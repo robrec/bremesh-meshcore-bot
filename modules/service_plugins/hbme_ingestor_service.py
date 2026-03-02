@@ -436,15 +436,16 @@ class HBMEIngestorService(BaseServicePlugin):
             if not packet_info:
                 return
             
-            # Build API payload
+            # Build API payload (matches IngestorPacketIn schema)
             api_payload = {
                 'route_type': self.ROUTE_TYPE_MAP.get(packet_info['route_type'], 'ROUTE_TYPE_FLOOD'),
                 'payload_type': self.PAYLOAD_TYPE_MAP.get(packet_info['payload_type'], 'PAYLOAD_TYPE_REQ'),
-                'snr': payload.get('snr', 0),
-                'rssi': payload.get('rssi', 0),
+                'snr': float(payload.get('snr', 0)),
+                'rssi': int(payload.get('rssi', 0)),
                 'path': packet_info['path_hex'],
-                'path_len': packet_info['path_len'],
-                'hash': packet_info['packet_hash']
+                'path_len': int(packet_info['path_len']),
+                'hash': packet_info['packet_hash'],
+                'raw_hex': raw_hex if raw_hex else None
             }
             
             # Add timestamp for preview
