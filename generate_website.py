@@ -923,7 +923,7 @@ def read_config(config_file: str = "config.ini") -> configparser.ConfigParser:
     config = configparser.ConfigParser()
     if not os.path.exists(config_file):
         raise FileNotFoundError(f"Config file not found: {config_file}")
-    config.read(config_file)
+    config.read(config_file, encoding='utf-8')
     return config
 
 

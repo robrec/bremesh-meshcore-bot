@@ -158,7 +158,7 @@ def validate_config(config_path: str) -> List[Tuple[str, str]]:
 
     config = configparser.ConfigParser()
     try:
-        config.read(config_path)
+        config.read(config_path, encoding='utf-8')
     except configparser.Error as e:
         return [(SEVERITY_ERROR, f"Failed to parse config: {e}")]
 
