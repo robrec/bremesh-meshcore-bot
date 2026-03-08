@@ -58,7 +58,31 @@
 
 <!-- Network Activity Overview -->
 <div class="row mb-4">
-    <div class="col-md-6">
+    <div class="col-md-4">
+        <div class="card shadow-sm">
+            <div class="card-header bg-gradient-primary text-white">
+                <div class="d-flex align-items-center">
+                    <i class="fas fa-broadcast-tower me-2"></i>
+                    <h5 class="mb-0">Advert senden</h5>
+                </div>
+            </div>
+            <div class="card-body p-3">
+                <div class="mb-2">
+                    <select id="advert-type" class="form-select form-select-sm">
+                        <option value="zero-hop">Zero-Hop (lokal)</option>
+                        <option value="flood">Flood (netzwerkweit)</option>
+                    </select>
+                </div>
+                <button id="btn-send-advert" class="btn btn-primary btn-sm w-100"
+                    onclick="window.dashboard.sendAdvert(document.getElementById('advert-type').value)">
+                    <i class="fas fa-broadcast-tower me-1"></i>Senden
+                </button>
+                <div id="advert-result" class="mt-2 small"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-4">
         <div class="card">
             <div class="card-header">
                 <i class="fas fa-users"></i> Active Contacts
@@ -82,7 +106,7 @@
         </div>
     </div>
     
-    <div class="col-md-6">
+    <div class="col-md-4">
         <div class="card">
             <div class="card-header">
                 <i class="fas fa-network-wired"></i> Network Health
@@ -705,6 +729,40 @@ class ModernDashboard {
         }
     }
     
+    sendAdvert(type) {
+        const btn = document.getElementById('btn-send-advert');
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Sende...';
+        }
+        fetch('/api/send-advert', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({type: type})
+        })
+        .then(r => r.json())
+        .then(data => {
+            if (data.success) {
+                const resultEl = document.getElementById('advert-result');
+                if (resultEl) {
+                    resultEl.innerHTML = `<span class="text-success"><i class="fas fa-check-circle me-1"></i>${data.message}</span>`;
+                    setTimeout(() => { resultEl.innerHTML = ''; }, 8000);
+                }
+            } else {
+                this.showError('Advert fehlgeschlagen: ' + (data.error || 'Unbekannter Fehler'));
+            }
+        })
+        .catch(err => {
+            this.showError('Advert-Anfrage fehlgeschlagen: ' + err.message);
+        })
+        .finally(() => {
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-broadcast-tower me-1"></i>Senden';
+            }
+        });
+    }
+
     showError(message) {
         const errorDiv = document.createElement('div');
         errorDiv.className = 'alert alert-danger alert-dismissible fade show';

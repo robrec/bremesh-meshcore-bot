@@ -812,8 +812,16 @@ long_jokes = false
         # Clear any existing handlers to prevent duplicates
         self.logger.handlers.clear()
         
-        # Console handler
+        # Console handler with Unicode-safe emit for Windows cp1252 terminals
         console_handler = logging.StreamHandler()
+        _orig_emit = console_handler.emit
+        def _safe_emit(record, _orig=_orig_emit):
+            try:
+                _orig(record)
+            except UnicodeEncodeError:
+                record.msg = record.msg.encode('ascii', 'replace').decode('ascii')
+                _orig(record)
+        console_handler.emit = _safe_emit
         console_handler.setFormatter(formatter)
         self.logger.addHandler(console_handler)
         
@@ -867,6 +875,14 @@ long_jokes = false
             # Add our formatter
             if not logger.handlers:
                 handler = logging.StreamHandler()
+                _orig_emit = handler.emit
+                def _safe_emit(record, _orig=_orig_emit):
+                    try:
+                        _orig(record)
+                    except UnicodeEncodeError:
+                        record.msg = record.msg.encode('ascii', 'replace').decode('ascii')
+                        _orig(record)
+                handler.emit = _safe_emit
                 handler.setFormatter(formatter)
                 logger.addHandler(handler)
         

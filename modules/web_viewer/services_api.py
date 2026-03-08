@@ -135,14 +135,14 @@ class ServicesAPI:
         @self.app.route('/api/telemetry/poll-now/<path:repeater_name>', methods=['POST'])
         def api_telemetry_poll_now(repeater_name):
             """Trigger ad-hoc poll for a specific repeater."""
-            data = request.get_json() or {}
+            data = request.get_json(silent=True) or {}
             path_mode = data.get('path', 'flood')
             return jsonify(self._trigger_poll(repeater_name, path_mode))
         
         @self.app.route('/api/telemetry/poll-all', methods=['POST'])
         def api_telemetry_poll_all():
             """Trigger ad-hoc poll for all repeaters."""
-            data = request.get_json() or {}
+            data = request.get_json(silent=True) or {}
             path_mode = data.get('path', 'flood')
             return jsonify(self._trigger_poll_all(path_mode))
         
@@ -173,6 +173,52 @@ class ServicesAPI:
         def api_telemetry_available_contacts():
             """Get known contacts for repeater selection."""
             return jsonify({'contacts': self._get_available_contacts()})
+        
+        @self.app.route('/api/telemetry/poll-interval', methods=['POST'])
+        def api_telemetry_poll_interval():
+            """Update poll interval (minutes)."""
+            data = request.get_json(silent=True) or {}
+            return jsonify(self._save_poll_interval(data))
+        
+        @self.app.route('/api/telemetry/mqtt-config')
+        def api_telemetry_mqtt_config():
+            """Get MQTT config for telemetry."""
+            cfg = self._get_telemetry_config()
+            result = {
+                'mqtt_enabled': cfg.get('mqtt_enabled', False),
+                'mqtt_server': cfg.get('mqtt_server', 'localhost'),
+                'mqtt_port': cfg.get('mqtt_port', 1883),
+                'mqtt_topic_request': cfg.get('mqtt_topic_request', 'meshcore/telemetry/request'),
+                'mqtt_topic_response': cfg.get('mqtt_topic_response', 'meshcore/telemetry/response'),
+            }
+            # Override with DB values if set
+            try:
+                db_path = self._get_telemetry_db_path()
+                if os.path.exists(db_path):
+                    conn = self._get_telemetry_db()
+                    cursor = conn.cursor()
+                    try:
+                        cursor.execute('SELECT mqtt_enabled, mqtt_topic_request, mqtt_topic_response FROM service_status WHERE id = 1')
+                        row = cursor.fetchone()
+                        if row:
+                            if row['mqtt_enabled'] is not None:
+                                result['mqtt_enabled'] = row['mqtt_enabled'] == '1'
+                            if row['mqtt_topic_request']:
+                                result['mqtt_topic_request'] = row['mqtt_topic_request']
+                            if row['mqtt_topic_response']:
+                                result['mqtt_topic_response'] = row['mqtt_topic_response']
+                    except sqlite3.OperationalError:
+                        pass
+                    conn.close()
+            except Exception:
+                pass
+            return jsonify(result)
+        
+        @self.app.route('/api/telemetry/mqtt-config', methods=['POST'])
+        def api_telemetry_mqtt_config_save():
+            """Save MQTT config for telemetry."""
+            data = request.get_json(silent=True) or {}
+            return jsonify(self._save_mqtt_config(data))
         
         # ─────────────────────────────────────────────────────────────────────
         # General Services Overview
@@ -774,8 +820,8 @@ class ServicesAPI:
             'max_retries': config.getint('TelemetryMonitor', 'max_retries', fallback=3),
             'default_path_mode': config.get('TelemetryMonitor', 'default_path_mode', fallback='flood'),
             'mqtt_enabled': config.getboolean('TelemetryMonitor', 'mqtt_enabled', fallback=False),
-            'mqtt_server': config.get('TelemetryMonitor', 'mqtt_server', fallback='localhost'),
-            'mqtt_port': config.getint('TelemetryMonitor', 'mqtt_port', fallback=1883),
+            'mqtt_server': config.get('MQTT', 'server', fallback='localhost'),
+            'mqtt_port': config.getint('MQTT', 'port', fallback=1883),
             'mqtt_topic_request': config.get('TelemetryMonitor', 'mqtt_topic_request', fallback='meshcore/telemetry/request'),
             'mqtt_topic_response': config.get('TelemetryMonitor', 'mqtt_topic_response', fallback='meshcore/telemetry/response'),
         }
@@ -842,6 +888,15 @@ class ServicesAPI:
             except sqlite3.OperationalError:
                 pass
             
+            # Runtime poll interval from DB
+            try:
+                cursor.execute('SELECT poll_interval_minutes FROM service_status WHERE id = 1')
+                row = cursor.fetchone()
+                if row and row['poll_interval_minutes']:
+                    status['poll_interval_minutes'] = row['poll_interval_minutes']
+            except sqlite3.OperationalError:
+                pass
+            
             # Stats
             try:
                 cursor.execute('SELECT COUNT(*) as cnt FROM telemetry_readings')
@@ -880,6 +935,75 @@ class ServicesAPI:
         
         return status
     
+    def _save_mqtt_config(self, data: dict) -> dict:
+        """Save MQTT telemetry topic config to telemetry DB (picked up by service)."""
+        try:
+            db_path = self._get_telemetry_db_path()
+            if not os.path.exists(db_path):
+                return {'success': False, 'error': 'Telemetry DB nicht initialisiert'}
+            
+            conn = self._get_telemetry_db()
+            cursor = conn.cursor()
+            
+            # Ensure columns exist (migration)
+            for col in ('mqtt_enabled', 'mqtt_topic_request', 'mqtt_topic_response'):
+                try:
+                    cursor.execute(f'SELECT {col} FROM service_status LIMIT 1')
+                except sqlite3.OperationalError:
+                    default = "''" if 'topic' in col else '0'
+                    cursor.execute(f'ALTER TABLE service_status ADD COLUMN {col} TEXT DEFAULT {default}')
+            
+            sets = []
+            vals = []
+            if 'mqtt_enabled' in data:
+                sets.append('mqtt_enabled = ?')
+                vals.append('1' if data['mqtt_enabled'] else '0')
+            if 'mqtt_topic_request' in data:
+                topic = data['mqtt_topic_request'].strip()
+                if topic:
+                    sets.append('mqtt_topic_request = ?')
+                    vals.append(topic)
+            if 'mqtt_topic_response' in data:
+                topic = data['mqtt_topic_response'].strip()
+                if topic:
+                    sets.append('mqtt_topic_response = ?')
+                    vals.append(topic)
+            
+            if not sets:
+                return {'success': False, 'error': 'Keine Änderungen'}
+            
+            cursor.execute(f'UPDATE service_status SET {", ".join(sets)} WHERE id = 1', vals)
+            conn.commit()
+            conn.close()
+            return {'success': True, 'message': 'MQTT-Konfiguration gespeichert (wird beim nächsten Zyklus übernommen)'}
+        except Exception as e:
+            self.logger.error(f"Error saving MQTT config: {e}")
+            return {'success': False, 'error': str(e)}
+
+    def _save_poll_interval(self, data: dict) -> dict:
+        """Save poll interval to telemetry DB (picked up by service at next cycle)."""
+        try:
+            minutes = int(data.get('minutes', 0))
+            if minutes < 1:
+                return {'success': False, 'error': 'Intervall muss mindestens 1 Minute sein'}
+            if minutes > 1440:
+                return {'success': False, 'error': 'Intervall darf maximal 1440 Minuten (24h) sein'}
+            
+            db_path = self._get_telemetry_db_path()
+            if not os.path.exists(db_path):
+                return {'success': False, 'error': 'Telemetry DB nicht initialisiert'}
+            
+            conn = self._get_telemetry_db()
+            conn.execute(
+                'UPDATE service_status SET poll_interval_minutes = ? WHERE id = 1',
+                (minutes,))
+            conn.commit()
+            conn.close()
+            return {'success': True, 'message': f'Poll-Intervall auf {minutes} Minuten gesetzt'}
+        except Exception as e:
+            self.logger.error(f"Error saving poll interval: {e}")
+            return {'success': False, 'error': str(e)}
+
     def _get_telemetry_readings(self) -> list:
         """Get latest telemetry readings."""
         try:

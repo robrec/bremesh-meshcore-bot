@@ -21,6 +21,7 @@ A Python bot that connects to MeshCore mesh networks via serial port, BLE, or TC
 - **Packet Capture**: Capture and publish packets to MQTT brokers with deep payload decoding ([docs](docs/packet-capture.md))
 - **HBME Ingestor**: Forward packets to the HBME API for centralized mesh analysis ([docs](docs/hbme-ingestor.md))
 - **Map Uploader**(wtf why?): Upload node adverts to map.meshcore.dev ([docs](docs/map-uploader.md))
+- **Telemetry Monitor**: Poll repeater battery/environment data via MQTT with web UI ([docs](#telemetry-monitor-service))
 - **Weather Service**: Scheduled forecasts, alerts, and lightning detection ([docs](docs/weather-service.md))
 
 ## Requirements
@@ -754,6 +755,168 @@ Forwards captured packets to the [HBME API](https://hbme.sh) for centralized mes
 **Zugang erhalten:** Kontaktiere [@bartzi:hbme.sh](https://matrix.to/#/@bartzi:hbme.sh) via Matrix, um deinen Token für die Registrierung auf [register.hbme.sh](https://register.hbme.sh/) zu bekommen.
 
 See [HBME Ingestor docs](docs/hbme-ingestor.md).
+
+### Telemetry Monitor Service
+
+Der Telemetry Monitor fragt die Batterie- und Umgebungsdaten (Temperatur, Luftfeuchtigkeit, Luftdruck, GPS) von Repeatern im Mesh-Netzwerk ab und speichert sie in einer SQLite-Datenbank. Ergebnisse werden auch via MQTT publiziert, sodass externe Systeme (Node-RED, Home Assistant, Grafana, etc.) die Daten in Echtzeit verarbeiten können.
+
+> **⚠️ WICHTIG: Repeater ACL-Berechtigung erforderlich!**
+>
+> Der Bot kann **nur dann Telemetriedaten** von einem Repeater abfragen, wenn er in der **Access Control List (ACL)** des Repeaters als **Read/Write** oder **Admin** eingetragen ist!
+>
+> Ohne diese Berechtigung wird der Telemetrie-Request vom Repeater ignoriert und der Bot erhält keine Antwort (Timeout).
+>
+> **So fügst du den Bot zur Repeater-ACL hinzu:**
+> 1. Verbinde dich mit dem Repeater über die MeshCore Companion App
+> 2. Öffne die Kontaktliste des Repeaters
+> 3. Suche den Bot-Kontakt (z.B. "TestBot")
+> 4. Setze die Berechtigung auf **Read/Write** oder **Admin**
+
+#### Konfiguration
+
+```ini
+[MQTT]
+server = localhost
+port = 1883
+transport = tcp
+use_tls = false
+use_auth_token = false
+
+[TelemetryMonitor]
+enabled = true
+poll_interval_minutes = 180
+request_timeout = 60
+max_retries = 3
+default_path_mode = flood
+database_path = telemetry_data.db
+# MQTT aktivieren für externe Systeme
+mqtt_enabled = true
+mqtt_topic_request = meshcore/telemetry/request
+mqtt_topic_response = meshcore/telemetry/response
+```
+
+#### MQTT Telemetrie-Request senden
+
+Sende eine JSON-Nachricht an das Request-Topic, um eine Telemetrie-Abfrage auszulösen:
+
+**Topic:** `meshcore/telemetry/request`
+
+```json
+{"repeater": "RepeaterName", "path": "flood"}
+```
+
+| Feld | Pflicht | Beschreibung |
+|------|---------|-------------|
+| `repeater` | ✅ | Name des Repeaters (exakt wie in der Kontaktliste) |
+| `path` | ❌ | Routing-Modus: `flood` (Default), `direct`, oder Hex-Path z.B. `ef,10` |
+
+**Beispiele:**
+
+```bash
+# Flood-Routing (Default)
+mosquitto_pub -h localhost -t meshcore/telemetry/request \
+  -m '{"repeater": "Mitte @BreMesh", "path": "flood"}'
+
+# Direct-Path (bekannter Pfad)
+mosquitto_pub -h localhost -t meshcore/telemetry/request \
+  -m '{"repeater": "Mitte @BreMesh", "path": "direct"}'
+
+# Custom Hex-Path
+mosquitto_pub -h localhost -t meshcore/telemetry/request \
+  -m '{"repeater": "Mitte @BreMesh", "path": "ef,10"}'
+
+# Minimal (ohne path, nutzt flood)
+mosquitto_pub -h localhost -t meshcore/telemetry/request \
+  -m '{"repeater": "Mitte @BreMesh"}'
+```
+
+#### MQTT Telemetrie-Response
+
+Der Bot publiziert die Telemetriedaten auf dem Response-Topic. Jede Abfrage (automatisch oder via MQTT-Request) wird hier veröffentlicht – auch fehlgeschlagene Versuche, sodass man den Fortschritt in Echtzeit mitlesen kann.
+
+**Topic:** `meshcore/telemetry/response`
+
+**Erfolgreiche Abfrage:**
+```json
+{
+  "repeater": "Mitte🔌 @BreMesh",
+  "success": true,
+  "path": "flood",
+  "attempt": "1/3",
+  "duration_ms": 2341,
+  "temperature": 23.0,
+  "humidity": null,
+  "pressure": null,
+  "battery_voltage": 4.34,
+  "battery_percent": 100.0,
+  "latitude": null,
+  "longitude": null,
+  "altitude": null
+}
+```
+
+**Fehlgeschlagener Versuch (Retry):**
+```json
+{
+  "repeater": "Mitte🔌 @BreMesh",
+  "success": false,
+  "path": "flood",
+  "attempt": "1/3",
+  "duration_ms": 60012,
+  "error": "No telemetry response (timeout)"
+}
+```
+
+**Automatischer Poll (Telemetrie-Reading):**
+```json
+{
+  "repeater": "Mitte🔌 @BreMesh",
+  "timestamp": "2026-03-08T17:18:52",
+  "duration_ms": 2341,
+  "temperature": 23.0,
+  "humidity": null,
+  "pressure": null,
+  "battery_voltage": 4.34,
+  "battery_percent": 100.0,
+  "latitude": null,
+  "longitude": null,
+  "altitude": null,
+  "raw_data": [
+    {"channel": 1, "type": "voltage", "value": 4.34},
+    {"channel": 1, "type": "temperature", "value": 23.0}
+  ]
+}
+```
+
+| Feld | Typ | Beschreibung |
+|------|-----|-------------|
+| `repeater` | string | Name des abgefragten Repeaters |
+| `success` | bool | `true` bei Erfolg, `false` bei Timeout (nur bei MQTT-Request) |
+| `attempt` | string | Aktueller Versuch, z.B. `"1/3"`, `"2/3"` (nur bei MQTT-Request) |
+| `path` | string | Verwendeter Routing-Modus (nur bei MQTT-Request) |
+| `timestamp` | string | ISO-Zeitstempel der Abfrage |
+| `duration_ms` | int | Dauer der Abfrage in Millisekunden |
+| `temperature` | float/null | Temperatur in °C |
+| `humidity` | float/null | Luftfeuchtigkeit in % |
+| `pressure` | float/null | Luftdruck in hPa |
+| `battery_voltage` | float/null | Batteriespannung in V |
+| `battery_percent` | float/null | Batteriestand in % (berechnet: 3.0V=0%, 4.2V=100%) |
+| `latitude` | float/null | GPS Breitengrad |
+| `longitude` | float/null | GPS Längengrad |
+| `altitude` | float/null | Höhe in m |
+| `raw_data` | array | Rohe LPP-Telemetriedaten vom Device (nur bei automatischem Poll) |
+| `error` | string | Fehlermeldung (nur bei `success: false`) |
+
+**Test via Kommandozeile:**
+```bash
+# Telemetrie-Responses mitlesen
+mosquitto_sub -h localhost -t meshcore/telemetry/response -v
+
+# Request senden und auf Antwort warten
+mosquitto_sub -h localhost -t meshcore/telemetry/response &
+mosquitto_pub -h localhost -t meshcore/telemetry/request \
+  -m '{"repeater": "Mitte @BreMesh"}'
+```
 
 ### Services Page (Web Viewer)
 

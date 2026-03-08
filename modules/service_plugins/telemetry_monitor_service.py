@@ -68,17 +68,19 @@ class TelemetryMonitorService(BaseServicePlugin):
             bot_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             self.database_path = os.path.join(bot_root, self.database_path)
 
-        # MQTT settings
+        # MQTT settings – broker connection from shared [MQTT] section
         self.mqtt_enabled: bool = config.getboolean(
             'TelemetryMonitor', 'mqtt_enabled', fallback=False)
         self.mqtt_server: str = config.get(
-            'TelemetryMonitor', 'mqtt_server', fallback='localhost')
+            'MQTT', 'server', fallback='localhost')
         self.mqtt_port: int = config.getint(
-            'TelemetryMonitor', 'mqtt_port', fallback=1883)
+            'MQTT', 'port', fallback=1883)
         self.mqtt_topic_request: str = config.get(
             'TelemetryMonitor', 'mqtt_topic_request', fallback='meshcore/telemetry/request')
         self.mqtt_topic_response: str = config.get(
             'TelemetryMonitor', 'mqtt_topic_response', fallback='meshcore/telemetry/response')
+        self.mqtt_transport: str = config.get(
+            'MQTT', 'transport', fallback='tcp').lower()
 
         # Repeaters (initial list from config, DB takes precedence once initialized)
         repeaters_str = config.get('TelemetryMonitor', 'repeaters', fallback='')
@@ -190,9 +192,25 @@ class TelemetryMonitorService(BaseServicePlugin):
                 next_poll_time TEXT,
                 poll_cycle_start TEXT,
                 repeaters_completed INTEGER DEFAULT 0,
-                repeaters_total INTEGER DEFAULT 0
+                repeaters_total INTEGER DEFAULT 0,
+                poll_interval_minutes INTEGER DEFAULT 30,
+                mqtt_enabled TEXT DEFAULT '',
+                mqtt_topic_request TEXT DEFAULT '',
+                mqtt_topic_response TEXT DEFAULT ''
             )
         ''')
+
+        # Migrate: add columns if missing (existing DBs)
+        for col, default in [
+            ('poll_interval_minutes', 'INTEGER DEFAULT 30'),
+            ('mqtt_enabled', "TEXT DEFAULT ''"),
+            ('mqtt_topic_request', "TEXT DEFAULT ''"),
+            ('mqtt_topic_response', "TEXT DEFAULT ''"),
+        ]:
+            try:
+                cursor.execute(f'SELECT {col} FROM service_status LIMIT 1')
+            except sqlite3.OperationalError:
+                cursor.execute(f'ALTER TABLE service_status ADD COLUMN {col} {default}')
 
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS webhook_config (
@@ -223,8 +241,8 @@ class TelemetryMonitorService(BaseServicePlugin):
 
         # Seed status row
         cursor.execute('''
-            INSERT OR IGNORE INTO service_status (id, status) VALUES (1, 'stopped')
-        ''')
+            INSERT OR IGNORE INTO service_status (id, status, poll_interval_minutes) VALUES (1, 'stopped', ?)
+        ''', (self.poll_interval_minutes,))
 
         # Seed webhook config row (merge initial config values)
         cursor.execute('SELECT COUNT(*) FROM webhook_config')
@@ -306,6 +324,38 @@ class TelemetryMonitorService(BaseServicePlugin):
         except Exception as e:
             logger.debug(f"Status update error: {e}")
 
+    def _reload_poll_interval(self) -> None:
+        """Re-read poll_interval_minutes and MQTT topics from DB (set via web UI)."""
+        if not self._db_conn:
+            return
+        try:
+            row = self._db_conn.execute(
+                'SELECT poll_interval_minutes, mqtt_enabled, mqtt_topic_request, mqtt_topic_response '
+                'FROM service_status WHERE id = 1').fetchone()
+            if row:
+                if row['poll_interval_minutes']:
+                    new_val = int(row['poll_interval_minutes'])
+                    if new_val >= 1 and new_val != self.poll_interval_minutes:
+                        logger.info(f"Poll interval changed: {self.poll_interval_minutes} → {new_val} min")
+                        self.poll_interval_minutes = new_val
+                if row['mqtt_enabled'] is not None and row['mqtt_enabled'] != '':
+                    new_mqtt = row['mqtt_enabled'] == '1'
+                    if new_mqtt != self.mqtt_enabled:
+                        logger.info(f"MQTT enabled changed: {self.mqtt_enabled} → {new_mqtt}")
+                        self.mqtt_enabled = new_mqtt
+                if row['mqtt_topic_request']:
+                    new_topic = row['mqtt_topic_request']
+                    if new_topic != self.mqtt_topic_request:
+                        logger.info(f"MQTT request topic changed: {self.mqtt_topic_request} → {new_topic}")
+                        self.mqtt_topic_request = new_topic
+                if row['mqtt_topic_response']:
+                    new_topic = row['mqtt_topic_response']
+                    if new_topic != self.mqtt_topic_response:
+                        logger.info(f"MQTT response topic changed: {self.mqtt_topic_response} → {new_topic}")
+                        self.mqtt_topic_response = new_topic
+        except Exception as e:
+            logger.debug(f"Poll interval / MQTT reload error: {e}")
+
     # ──────────────────────────────────────────────────────────────────
     # MQTT
     # ──────────────────────────────────────────────────────────────────
@@ -319,12 +369,14 @@ class TelemetryMonitorService(BaseServicePlugin):
 
         try:
             client_id = f"meshcore-telemetry-{os.getpid()}"
-            self._mqtt_client = mqtt.Client(client_id=client_id)
+            self._mqtt_client = mqtt.Client(
+                client_id=client_id,
+                transport=self.mqtt_transport)
             self._mqtt_client.on_connect = self._on_mqtt_connect
             self._mqtt_client.on_message = self._on_mqtt_message
             self._mqtt_client.on_disconnect = self._on_mqtt_disconnect
 
-            logger.info(f"MQTT connecting to {self.mqtt_server}:{self.mqtt_port}")
+            logger.info(f"MQTT connecting to {self.mqtt_server}:{self.mqtt_port} ({self.mqtt_transport})")
             self._mqtt_client.connect_async(self.mqtt_server, self.mqtt_port, keepalive=60)
             self._mqtt_client.loop_start()
         except Exception as e:
@@ -367,18 +419,9 @@ class TelemetryMonitorService(BaseServicePlugin):
                     'success': False, 'error': 'Missing "repeater" field'})
                 return
 
-            # Insert ad-hoc request into DB
-            if self._db_conn:
-                cursor = self._db_conn.cursor()
-                cursor.execute('''
-                    INSERT INTO adhoc_poll_requests
-                        (repeater_name, status, path_mode, source)
-                    VALUES (?, 'pending', ?, 'mqtt')
-                ''', (repeater_name, path_mode))
-                self._db_conn.commit()
-                logger.info(f"MQTT ad-hoc request queued: {repeater_name} (path={path_mode})")
+            logger.info(f"MQTT ad-hoc request: {repeater_name} (path={path_mode})")
 
-            # Schedule async execution
+            # Schedule async execution (DB insert happens in event loop thread)
             if self._event_loop and not self._event_loop.is_closed():
                 asyncio.run_coroutine_threadsafe(
                     self._handle_mqtt_request(repeater_name, path_mode),
@@ -393,6 +436,16 @@ class TelemetryMonitorService(BaseServicePlugin):
     async def _handle_mqtt_request(self, repeater_name: str, path_mode: str) -> None:
         """Process an MQTT-triggered telemetry request."""
         try:
+            # Insert ad-hoc request into DB (must run in event loop thread)
+            if self._db_conn:
+                cursor = self._db_conn.cursor()
+                cursor.execute('''
+                    INSERT INTO adhoc_poll_requests
+                        (repeater_name, status, path_mode, source)
+                    VALUES (?, 'pending', ?, 'mqtt')
+                ''', (repeater_name, path_mode))
+                self._db_conn.commit()
+
             contact = await self._find_contact(repeater_name)
             if not contact:
                 self._publish_mqtt_response({
@@ -402,24 +455,37 @@ class TelemetryMonitorService(BaseServicePlugin):
                 })
                 return
 
-            telemetry_data = await self._request_telemetry(contact, path_mode)
-            if telemetry_data:
-                parsed = self._parse_lpp_data(telemetry_data)
-                self._store_reading(repeater_name, parsed, telemetry_data, 0)
-                response = {
-                    'repeater': repeater_name,
-                    'success': True,
-                    'path': path_mode,
-                    **parsed
-                }
-            else:
-                response = {
+            max_attempts = self.max_retries
+            for attempt in range(1, max_attempts + 1):
+                t0 = time.time()
+                telemetry_data = await self._request_telemetry(contact, path_mode)
+                duration_ms = int((time.time() - t0) * 1000)
+
+                if telemetry_data:
+                    parsed = self._parse_lpp_data(telemetry_data)
+                    self._store_reading(repeater_name, parsed, telemetry_data, duration_ms)
+                    response = {
+                        'repeater': repeater_name,
+                        'success': True,
+                        'path': path_mode,
+                        'attempt': f'{attempt}/{max_attempts}',
+                        'duration_ms': duration_ms,
+                        **parsed,
+                    }
+                    self._publish_mqtt_response(response)
+                    return
+
+                # Publish intermediate failure so subscriber sees progress
+                self._publish_mqtt_response({
                     'repeater': repeater_name,
                     'success': False,
                     'path': path_mode,
-                    'error': 'No telemetry response (timeout)'
-                }
-            self._publish_mqtt_response(response)
+                    'attempt': f'{attempt}/{max_attempts}',
+                    'duration_ms': duration_ms,
+                    'error': 'No telemetry response (timeout)',
+                })
+                if attempt < max_attempts:
+                    logger.info(f"MQTT request retry {attempt}/{max_attempts} for {repeater_name}")
         except Exception as e:
             logger.error(f"MQTT request processing error: {e}")
             self._publish_mqtt_response({
@@ -438,6 +504,25 @@ class TelemetryMonitorService(BaseServicePlugin):
             logger.debug(f"MQTT response published: {payload[:200]}")
         except Exception as e:
             logger.error(f"MQTT publish error: {e}")
+
+    def _publish_telemetry_reading(self, repeater_name: str, parsed: Dict[str, Any],
+                                   raw_data: List[Dict], duration_ms: int) -> None:
+        """Publish a telemetry reading to MQTT after successful poll."""
+        if not self._mqtt_client or not self._mqtt_connected:
+            return
+        try:
+            payload = json.dumps({
+                'repeater': repeater_name,
+                'timestamp': datetime.now().strftime('%Y-%m-%dT%H:%M:%S'),
+                'duration_ms': duration_ms,
+                **parsed,
+                'raw_data': raw_data,
+            }, default=str)
+            topic = self.mqtt_topic_response
+            self._mqtt_client.publish(topic, payload, qos=1, retain=True)
+            logger.info(f"MQTT telemetry published: {topic}")
+        except Exception as e:
+            logger.error(f"MQTT telemetry publish error: {e}")
 
     # ──────────────────────────────────────────────────────────────────
     # Service lifecycle
@@ -525,6 +610,7 @@ class TelemetryMonitorService(BaseServicePlugin):
                 logger.error(f"Polling loop error: {e}", exc_info=True)
 
             self._last_poll_time = datetime.now()
+            self._reload_poll_interval()
             next_poll = datetime.now() + timedelta(minutes=self.poll_interval_minutes)
             self._update_status('waiting', current_repeater=None, current_attempt=None,
                                 next_poll_time=next_poll.strftime('%Y-%m-%d %H:%M:%S'),
@@ -572,8 +658,12 @@ class TelemetryMonitorService(BaseServicePlugin):
 
     async def _poll_single_repeater(self, repeater_name: str, repeater_idx: int = 0,
                                      is_manual: bool = False,
-                                     path_mode: Optional[str] = None) -> None:
-        """Poll a single repeater with retry logic."""
+                                     path_mode: Optional[str] = None) -> bool:
+        """Poll a single repeater with retry logic.
+
+        Returns:
+            True if telemetry data was received, False otherwise.
+        """
         if path_mode is None:
             path_mode = self.default_path_mode
         logger.info(f"Polling telemetry from: {repeater_name} (path={path_mode})"
@@ -588,7 +678,7 @@ class TelemetryMonitorService(BaseServicePlugin):
             logger.warning(f"POLL ABORTED: {error_msg}")
             self._record_poll_attempt(repeater_name, False, error_msg, 0,
                                       is_manual=is_manual, path_mode=path_mode)
-            return
+            return False
 
         for attempt in range(1, self.max_retries + 1):
             start_time = datetime.now()
@@ -607,7 +697,7 @@ class TelemetryMonitorService(BaseServicePlugin):
                                               path_mode=path_mode)
                     if self.verbose:
                         logger.info(f"Telemetry from {repeater_name}: {parsed}")
-                    return
+                    return True
                 else:
                     logger.warning(
                         f"No telemetry data from {repeater_name} (attempt {attempt}/{self.max_retries})")
@@ -629,6 +719,7 @@ class TelemetryMonitorService(BaseServicePlugin):
                                   attempt_number=self.max_retries, is_manual=is_manual,
                                   path_mode=path_mode)
         logger.warning(f"POLL FAILED: {repeater_name} – {error_msg}")
+        return False
 
     # ──────────────────────────────────────────────────────────────────
     # Ad-hoc requests (from web UI and MQTT)
@@ -662,13 +753,20 @@ class TelemetryMonitorService(BaseServicePlugin):
 
             try:
                 self._update_status('adhoc_polling', current_repeater=repeater_name)
-                await self._poll_single_repeater(repeater_name, is_manual=True, path_mode=path_mode)
+                success = await self._poll_single_repeater(repeater_name, is_manual=True, path_mode=path_mode)
 
-                cursor.execute('''
-                    UPDATE adhoc_poll_requests
-                    SET status = 'completed', result = 'success', completed_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
-                ''', (req_id,))
+                if success:
+                    cursor.execute('''
+                        UPDATE adhoc_poll_requests
+                        SET status = 'completed', result = 'success', completed_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    ''', (req_id,))
+                else:
+                    cursor.execute('''
+                        UPDATE adhoc_poll_requests
+                        SET status = 'failed', result = 'no_response', completed_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    ''', (req_id,))
                 self._db_conn.commit()
             except Exception as e:
                 cursor.execute('''
@@ -850,6 +948,9 @@ class TelemetryMonitorService(BaseServicePlugin):
             logger.info(f"Stored telemetry for {repeater_name}: "
                         f"voltage={parsed.get('battery_voltage')}, "
                         f"temp={parsed.get('temperature')}")
+
+            # Publish to MQTT
+            self._publish_telemetry_reading(repeater_name, parsed, raw_data, duration_ms)
 
             # Webhook: check threshold + interval
             self._maybe_send_webhook(repeater_name, parsed)

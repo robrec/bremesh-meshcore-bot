@@ -366,7 +366,14 @@ class PacketCaptureService(BaseServicePlugin):
         return result
 
     def _parse_mqtt_brokers(self, config) -> List[Dict[str, Any]]:
-        """Parse MQTT broker configuration (mqttN_* format).
+        """Parse MQTT broker configuration.
+        
+        Connection settings (server, port, transport, TLS, auth_token) are
+        read from the shared [MQTT] section.  Topics are read from
+        [PacketCapture] using mqtt_topic_* keys.
+        
+        For additional brokers, add mqtt2_* keys in [PacketCapture] with
+        full connection + topic settings to override the shared defaults.
         
         Args:
             config: ConfigParser object containing the configuration.
@@ -375,22 +382,67 @@ class PacketCaptureService(BaseServicePlugin):
             List[Dict[str, Any]]: List of configured MQTT broker dictionaries.
         """
         brokers = []
+
+        # Shared [MQTT] section defaults
+        has_mqtt_section = config.has_section('MQTT')
+        default_server = config.get('MQTT', 'server', fallback='localhost') if has_mqtt_section else 'localhost'
+        default_port = config.getint('MQTT', 'port', fallback=1883) if has_mqtt_section else 1883
+        default_transport = config.get('MQTT', 'transport', fallback='tcp').lower() if has_mqtt_section else 'tcp'
+        default_use_tls = config.getboolean('MQTT', 'use_tls', fallback=False) if has_mqtt_section else False
+        default_use_auth_token = config.getboolean('MQTT', 'use_auth_token', fallback=False) if has_mqtt_section else False
         
-        # Parse multiple brokers (mqtt1_*, mqtt2_*, etc.)
-        broker_num = 1
-        while True:
-            enabled_key = f'mqtt{broker_num}_enabled'
-            server_key = f'mqtt{broker_num}_server'
+        # Primary broker: connection from [MQTT], topics from [PacketCapture] mqtt_topic_*
+        if has_mqtt_section and config.has_option('MQTT', 'server'):
+            upload_types_raw = config.get('PacketCapture', 'mqtt_upload_packet_types', fallback='').strip()
+            upload_packet_types = None
+            if upload_types_raw:
+                upload_packet_types = frozenset(t.strip() for t in upload_types_raw.split(',') if t.strip())
+                if not upload_packet_types:
+                    upload_packet_types = None
+
+            broker = {
+                'enabled': True,
+                'host': default_server,
+                'port': default_port,
+                'username': config.get('MQTT', 'username', fallback=None),
+                'password': config.get('MQTT', 'password', fallback=None),
+                'topic_prefix': config.get('PacketCapture', 'mqtt_topic_prefix', fallback=None),
+                'topic_status': config.get('PacketCapture', 'mqtt_topic_status', fallback=None),
+                'topic_packets': config.get('PacketCapture', 'mqtt_topic_packets', fallback=None),
+                'use_auth_token': default_use_auth_token,
+                'token_audience': config.get('MQTT', 'token_audience', fallback=None),
+                'transport': default_transport,
+                'use_tls': default_use_tls,
+                'websocket_path': config.get('MQTT', 'websocket_path', fallback='/mqtt'),
+                'client_id': config.get('PacketCapture', 'mqtt_client_id', fallback=None),
+                'upload_packet_types': upload_packet_types,
+                'topic_send_dm': config.get('PacketCapture', 'mqtt_topic_send_dm', fallback=None),
+                'topic_send_channel': config.get('PacketCapture', 'mqtt_topic_send_channel', fallback=None),
+            }
             
+            if not broker['topic_prefix']:
+                broker['topic_prefix'] = 'meshcore/packets'
+            
+            if self.mqtt_subscribe_enabled:
+                if not broker['topic_send_dm']:
+                    broker['topic_send_dm'] = f"{broker['topic_prefix']}/send/dm"
+                if not broker['topic_send_channel']:
+                    broker['topic_send_channel'] = f"{broker['topic_prefix']}/send/channel"
+            
+            brokers.append(broker)
+        
+        # Additional brokers: mqtt2_*, mqtt3_*, etc. in [PacketCapture]
+        broker_num = 2
+        while True:
+            server_key = f'mqtt{broker_num}_server'
             if not config.has_option('PacketCapture', server_key):
                 break
             
-            enabled = config.getboolean('PacketCapture', enabled_key, fallback=True)
+            enabled = config.getboolean('PacketCapture', f'mqtt{broker_num}_enabled', fallback=True)
             if not enabled:
                 broker_num += 1
                 continue
             
-            # Parse upload_packet_types: comma-separated list (e.g. "2,4"); empty/unset = upload all
             upload_types_raw = config.get('PacketCapture', f'mqtt{broker_num}_upload_packet_types', fallback='').strip()
             upload_packet_types = None
             if upload_types_raw:
@@ -400,17 +452,17 @@ class PacketCaptureService(BaseServicePlugin):
 
             broker = {
                 'enabled': True,
-                'host': config.get('PacketCapture', server_key, fallback='localhost'),
-                'port': config.getint('PacketCapture', f'mqtt{broker_num}_port', fallback=1883),
+                'host': config.get('PacketCapture', server_key, fallback=default_server),
+                'port': config.getint('PacketCapture', f'mqtt{broker_num}_port', fallback=default_port),
                 'username': config.get('PacketCapture', f'mqtt{broker_num}_username', fallback=None),
                 'password': config.get('PacketCapture', f'mqtt{broker_num}_password', fallback=None),
                 'topic_prefix': config.get('PacketCapture', f'mqtt{broker_num}_topic_prefix', fallback=None),
                 'topic_status': config.get('PacketCapture', f'mqtt{broker_num}_topic_status', fallback=None),
                 'topic_packets': config.get('PacketCapture', f'mqtt{broker_num}_topic_packets', fallback=None),
-                'use_auth_token': config.getboolean('PacketCapture', f'mqtt{broker_num}_use_auth_token', fallback=False),
+                'use_auth_token': config.getboolean('PacketCapture', f'mqtt{broker_num}_use_auth_token', fallback=default_use_auth_token),
                 'token_audience': config.get('PacketCapture', f'mqtt{broker_num}_token_audience', fallback=None),
-                'transport': config.get('PacketCapture', f'mqtt{broker_num}_transport', fallback='tcp').lower(),
-                'use_tls': config.getboolean('PacketCapture', f'mqtt{broker_num}_use_tls', fallback=False),
+                'transport': config.get('PacketCapture', f'mqtt{broker_num}_transport', fallback=default_transport).lower(),
+                'use_tls': config.getboolean('PacketCapture', f'mqtt{broker_num}_use_tls', fallback=default_use_tls),
                 'websocket_path': config.get('PacketCapture', f'mqtt{broker_num}_websocket_path', fallback='/mqtt'),
                 'client_id': config.get('PacketCapture', f'mqtt{broker_num}_client_id', fallback=None),
                 'upload_packet_types': upload_packet_types,
@@ -418,11 +470,9 @@ class PacketCaptureService(BaseServicePlugin):
                 'topic_send_channel': config.get('PacketCapture', f'mqtt{broker_num}_topic_send_channel', fallback=None),
             }
             
-            # Set default topic_prefix if not set
             if not broker['topic_prefix']:
                 broker['topic_prefix'] = 'meshcore/packets'
             
-            # Set default send topics if subscribe is enabled but no explicit topics
             if self.mqtt_subscribe_enabled:
                 if not broker['topic_send_dm']:
                     broker['topic_send_dm'] = f"{broker['topic_prefix']}/send/dm"

@@ -27,6 +27,7 @@ class MessageScheduler:
         self.scheduler_thread = None
         self.last_channel_ops_check_time = 0
         self.last_message_queue_check_time = 0
+        self.last_advert_request_check_time = 0
     
     def get_current_time(self):
         """Get current time in configured timezone"""
@@ -409,6 +410,21 @@ class MessageScheduler:
                         loop.run_until_complete(self._process_channel_operations())
                     self.last_channel_ops_check_time = time.time()
             
+            # Process pending advert requests from web viewer (every 5 seconds)
+            if time.time() - self.last_advert_request_check_time >= 5:
+                if hasattr(self.bot, 'connected') and self.bot.connected:
+                    import asyncio
+                    if hasattr(self.bot, 'main_event_loop') and self.bot.main_event_loop and self.bot.main_event_loop.is_running():
+                        future = asyncio.run_coroutine_threadsafe(
+                            self._process_advert_requests(),
+                            self.bot.main_event_loop
+                        )
+                        try:
+                            future.result(timeout=30)
+                        except Exception as e:
+                            self.logger.error(f"Error processing advert requests: {e}")
+                    self.last_advert_request_check_time = time.time()
+            
             # Process feed message queue (every 2 seconds)
             if time.time() - self.last_message_queue_check_time >= 2:  # Every 2 seconds
                 if (hasattr(self.bot, 'feed_manager') and self.bot.feed_manager and 
@@ -621,3 +637,70 @@ class MessageScheduler:
                     self.logger.error(f"Parent directory: {parent} (exists: {parent.exists()}, writable: {os.access(str(parent), os.W_OK) if parent.exists() else False})")
             else:
                 self.logger.error(f"Database path: {db_path_str}")
+
+    async def _process_advert_requests(self):
+        """Process pending advert requests from the web viewer"""
+        try:
+            db_path = str(self.bot.db_manager.db_path)
+
+            with sqlite3.connect(db_path, timeout=30.0) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+
+                # Check if table exists
+                cursor.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='pending_advert_requests'"
+                )
+                if not cursor.fetchone():
+                    return
+
+                cursor.execute('''
+                    SELECT id, advert_type
+                    FROM pending_advert_requests
+                    WHERE status = 'pending'
+                    ORDER BY requested_at ASC
+                    LIMIT 1
+                ''')
+                request = cursor.fetchone()
+
+            if not request:
+                return
+
+            req_id = request['id']
+            advert_type = request['advert_type']
+            flood = advert_type == 'flood'
+            label = 'Flood' if flood else 'Zero-Hop'
+
+            self.logger.info(f"Processing {label} advert request #{req_id} from web viewer")
+
+            try:
+                await self.bot.meshcore.commands.send_advert(flood=flood)
+                self.bot.last_advert_time = time.time()
+                self.logger.info(f"{label} advert sent successfully (request #{req_id})")
+
+                with sqlite3.connect(db_path, timeout=30.0) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        UPDATE pending_advert_requests
+                        SET status = 'completed',
+                            completed_at = CURRENT_TIMESTAMP,
+                            result = ?
+                        WHERE id = ?
+                    ''', (f'{label} advert sent successfully', req_id))
+                    conn.commit()
+
+            except Exception as e:
+                self.logger.error(f"Error sending {label} advert (request #{req_id}): {e}")
+                with sqlite3.connect(db_path, timeout=30.0) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        UPDATE pending_advert_requests
+                        SET status = 'failed',
+                            completed_at = CURRENT_TIMESTAMP,
+                            result = ?
+                        WHERE id = ?
+                    ''', (str(e), req_id))
+                    conn.commit()
+
+        except Exception as e:
+            self.logger.exception(f"Error in _process_advert_requests: {e}")

@@ -37,6 +37,22 @@
     [data-theme="dark"] .stat-pill.info    { color: #6ea8fe; border-color: #6ea8fe; }
     [data-theme="dark"] .stat-pill.warning { color: #ffda6a; border-color: #ffda6a; }
 
+    .stat-pill.editable { cursor: pointer; }
+    .stat-pill.editable:hover { opacity: 0.8; }
+    .interval-edit-input {
+        width: 50px;
+        border: none;
+        background: transparent;
+        font-size: 1.1rem;
+        font-weight: 600;
+        color: inherit;
+        text-align: center;
+        outline: none;
+        -moz-appearance: textfield;
+    }
+    .interval-edit-input::-webkit-outer-spin-button,
+    .interval-edit-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+
     .battery-bar {
         height: 20px;
         border-radius: 4px;
@@ -208,7 +224,62 @@
                 </div>
             </div>
 
-            <!-- ═══ 5. Webhook Konfiguration (collapsible) ═══ -->
+            <!-- ═══ 5. MQTT Konfiguration (collapsible) ═══ -->
+            <div class="card mb-3">
+                <div class="card-header py-2 collapsible-header d-flex justify-content-between align-items-center"
+                     onclick="toggleSection('mqttConfig')">
+                    <h6 class="mb-0"><i class="fas fa-plug me-1"></i>MQTT Konfiguration</h6>
+                    <i class="fas fa-chevron-down" id="mqttConfig-chevron"></i>
+                </div>
+                <div class="card-body" id="mqttConfig-body" style="display:none;">
+                    <p class="text-muted small mb-2">
+                        MQTT-Topics für Telemetrie-Daten. Antworten werden auf dem Response-Topic veröffentlicht,
+                        Fernabfragen können über das Request-Topic ausgelöst werden.
+                    </p>
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <label class="form-label small fw-bold">Broker</label>
+                            <input type="text" class="form-control form-control-sm" id="mqtt-server" disabled
+                                   title="Wird in [MQTT] Sektion der config.ini konfiguriert">
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small fw-bold">Port</label>
+                            <input type="number" class="form-control form-control-sm" id="mqtt-port" disabled
+                                   title="Wird in [MQTT] Sektion der config.ini konfiguriert">
+                        </div>
+                        <div class="col-md-6 d-flex align-items-end">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="mqtt-enabled">
+                                <label class="form-check-label small" for="mqtt-enabled">MQTT aktiviert</label>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">
+                                <i class="fas fa-arrow-up me-1 text-success"></i>Response Topic
+                                <small class="text-muted">(Telemetriedaten werden hier veröffentlicht)</small>
+                            </label>
+                            <input type="text" class="form-control form-control-sm" id="mqtt-topic-response"
+                                   placeholder="meshcore/telemetry/response">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small fw-bold">
+                                <i class="fas fa-arrow-down me-1 text-primary"></i>Request Topic
+                                <small class="text-muted">(Fernabfragen werden hier empfangen)</small>
+                            </label>
+                            <input type="text" class="form-control form-control-sm" id="mqtt-topic-request"
+                                   placeholder="meshcore/telemetry/request">
+                        </div>
+                        <div class="col-12 d-flex gap-2">
+                            <button class="btn btn-sm btn-primary" onclick="saveMqttConfig()">
+                                <i class="fas fa-save me-1"></i>Speichern
+                            </button>
+                        </div>
+                    </div>
+                    <div id="mqtt-save-result" class="mt-2"></div>
+                </div>
+            </div>
+
+            <!-- ═══ 6. Webhook Konfiguration (collapsible) ═══ -->
             <div class="card mb-3">
                 <div class="card-header py-2 collapsible-header d-flex justify-content-between align-items-center"
                      onclick="toggleSection('webhookConfig')">
@@ -298,6 +369,7 @@ function refreshAll() {
     loadReadings();
     loadRepeaters();
     loadPollHistory();
+    loadMqttConfig();
     loadWebhookConfig();
     loadWebhookLog();
     loadAvailableContacts();
@@ -333,7 +405,11 @@ function loadStatus() {
             heroEl.innerHTML = `
                 <span class="stat-pill ${statusClass}"><i class="fas fa-circle me-1"></i>${statusText}</span>
                 <span class="stat-pill info"><span class="stat-value">${(data.repeaters||[]).length}</span> Repeater</span>
-                <span class="stat-pill info"><span class="stat-value">${data.poll_interval_minutes||'-'}</span> min Intervall</span>
+                <span class="stat-pill info editable" title="Klicken zum Ändern" onclick="editPollInterval(this, ${data.poll_interval_minutes||30})">
+                    <i class="fas fa-clock me-1"></i>
+                    <span class="stat-value" id="interval-display">${data.poll_interval_minutes||'-'}</span> min Intervall
+                    <i class="fas fa-pencil-alt ms-1" style="font-size:0.7rem; opacity:0.5;"></i>
+                </span>
                 <span class="stat-pill info"><span class="stat-value">${data.total_readings||0}</span> Messungen</span>
                 ${data.mqtt_enabled ? '<span class="stat-pill success"><i class="fas fa-plug me-1"></i>MQTT</span>' : ''}
                 ${data.webhook_enabled ? '<span class="stat-pill success"><i class="fas fa-paper-plane me-1"></i>Webhook</span>' : ''}
@@ -547,6 +623,49 @@ function loadPollHistory() {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
+   MQTT Config
+   ═══════════════════════════════════════════════════════════════════ */
+function loadMqttConfig() {
+    fetch('/api/telemetry/mqtt-config')
+        .then(r => r.json())
+        .then(cfg => {
+            document.getElementById('mqtt-server').value = cfg.mqtt_server || 'localhost';
+            document.getElementById('mqtt-port').value = cfg.mqtt_port || 1883;
+            document.getElementById('mqtt-enabled').checked = !!cfg.mqtt_enabled;
+            document.getElementById('mqtt-topic-request').value = cfg.mqtt_topic_request || '';
+            document.getElementById('mqtt-topic-response').value = cfg.mqtt_topic_response || '';
+        })
+        .catch(() => {});
+}
+
+function saveMqttConfig() {
+    const data = {
+        mqtt_enabled: document.getElementById('mqtt-enabled').checked,
+        mqtt_topic_request: document.getElementById('mqtt-topic-request').value.trim(),
+        mqtt_topic_response: document.getElementById('mqtt-topic-response').value.trim(),
+    };
+    fetch('/api/telemetry/mqtt-config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(data),
+    })
+    .then(r => r.json())
+    .then(res => {
+        const el = document.getElementById('mqtt-save-result');
+        if (res.success) {
+            toast(res.message || 'Gespeichert');
+            el.innerHTML = '<div class="alert alert-success py-1 mb-0 small"><i class="fas fa-check-circle me-1"></i>' + escHtml(res.message) + '</div>';
+        } else {
+            toast(res.error || 'Fehler', 'error');
+            el.innerHTML = '<div class="alert alert-danger py-1 mb-0 small"><i class="fas fa-times-circle me-1"></i>' + escHtml(res.error) + '</div>';
+        }
+        setTimeout(() => { el.innerHTML = ''; }, 5000);
+        loadStatus();
+    })
+    .catch(e => toast('Fehler: ' + e.message, 'error'));
+}
+
+/* ═══════════════════════════════════════════════════════════════════
    Webhook Config
    ═══════════════════════════════════════════════════════════════════ */
 function loadWebhookConfig() {
@@ -641,6 +760,48 @@ function loadAvailableContacts() {
             dl.innerHTML = contacts.map(c => `<option value="${escAttr(c.name)}">`).join('');
         })
         .catch(() => {});
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Poll Interval
+   ═══════════════════════════════════════════════════════════════════ */
+function editPollInterval(pill, currentVal) {
+    // Replace pill content with inline input
+    pill.onclick = null;
+    pill.innerHTML = `
+        <i class="fas fa-clock me-1"></i>
+        <input type="number" class="interval-edit-input" id="interval-input"
+               min="1" max="1440" value="${currentVal}"
+               onkeydown="if(event.key==='Enter') savePollInterval()"
+               onblur="savePollInterval()">
+        min Intervall
+    `;
+    const inp = document.getElementById('interval-input');
+    inp.focus();
+    inp.select();
+}
+
+function savePollInterval() {
+    const inp = document.getElementById('interval-input');
+    if (!inp) return;
+    const val = parseInt(inp.value) || 0;
+    if (val < 1 || val > 1440) {
+        toast('Intervall muss zwischen 1 und 1440 Minuten liegen', 'error');
+        loadStatus();
+        return;
+    }
+    fetch('/api/telemetry/poll-interval', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({minutes: val}),
+    })
+    .then(r => r.json())
+    .then(res => {
+        if (res.success) toast(res.message || 'Gespeichert');
+        else toast(res.error || 'Fehler', 'error');
+        loadStatus();
+    })
+    .catch(e => { toast('Fehler: ' + e.message, 'error'); loadStatus(); });
 }
 
 /* ═══════════════════════════════════════════════════════════════════

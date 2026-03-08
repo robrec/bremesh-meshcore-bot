@@ -1320,6 +1320,42 @@ class BotDataViewer:
                 self.logger.error(f"Error optimizing database: {e}")
                 return jsonify({'success': False, 'error': str(e)}), 500
         
+        @self.app.route('/api/send-advert', methods=['POST'])
+        def api_send_advert():
+            """Queue an advert request (processed by bot scheduler)"""
+            try:
+                data = request.get_json(silent=True) or {}
+                advert_type = data.get('type', 'zero-hop')
+                if advert_type not in ('zero-hop', 'flood'):
+                    return jsonify({'success': False, 'error': 'Typ muss zero-hop oder flood sein'}), 400
+                
+                conn = self._get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS pending_advert_requests (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        advert_type TEXT NOT NULL DEFAULT 'zero-hop',
+                        requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        status TEXT DEFAULT 'pending',
+                        completed_at TIMESTAMP,
+                        result TEXT,
+                        source TEXT DEFAULT 'webui'
+                    )
+                ''')
+                cursor.execute('''
+                    INSERT INTO pending_advert_requests (advert_type, status, source)
+                    VALUES (?, 'pending', 'webui')
+                ''', (advert_type,))
+                conn.commit()
+                req_id = cursor.lastrowid
+                conn.close()
+                label = 'Flood' if advert_type == 'flood' else 'Zero-Hop'
+                return jsonify({'success': True, 'request_id': req_id,
+                                'message': f'{label}-Advert wurde angefordert'})
+            except Exception as e:
+                self.logger.error(f"Error queuing advert: {e}")
+                return jsonify({'success': False, 'error': str(e)}), 500
+        
         @self.app.route('/api/mesh/nodes')
         def api_mesh_nodes():
             """Get all repeater nodes with locations and metadata"""
