@@ -918,6 +918,63 @@ mosquitto_pub -h localhost -t meshcore/telemetry/request \
   -m '{"repeater": "Mitte @BreMesh"}'
 ```
 
+#### WebSocket Telemetrie-Stream
+
+Die Telemetriedaten werden auch über den WebSocket des Web Viewers gestreamt (gleiche Datenstruktur wie MQTT). Clients können sich auf den `telemetry_data`-Event subscriben, um Echtzeit-Updates zu erhalten.
+
+**Verbindung (JavaScript/Socket.IO):**
+```javascript
+const socket = io('http://localhost:8080');
+
+// Telemetrie-Stream abonnieren
+socket.emit('subscribe_telemetry');
+
+// Telemetrie-Events empfangen
+socket.on('telemetry_data', (data) => {
+  console.log('Telemetrie:', data);
+});
+```
+
+**Event:** `telemetry_data`
+
+Es gibt zwei Typen von Events:
+
+**`type: "reading"` — Erfolgreiche Messung:**
+```json
+{
+  "type": "reading",
+  "repeater": "Mitte🔌 @BreMesh",
+  "timestamp": "2026-03-08 17:18:52",
+  "duration_ms": 2341,
+  "temperature": 23.0,
+  "humidity": null,
+  "pressure": null,
+  "battery_voltage": 4.34,
+  "battery_percent": 100.0,
+  "latitude": null,
+  "longitude": null,
+  "altitude": null,
+  "raw_data": [
+    {"channel": 1, "type": "voltage", "value": 4.34},
+    {"channel": 1, "type": "temperature", "value": 23.0}
+  ]
+}
+```
+
+**`type: "poll_attempt"` — Poll-Versuch (Erfolg oder Fehler):**
+```json
+{
+  "type": "poll_attempt",
+  "repeater": "Mitte🔌 @BreMesh",
+  "timestamp": "2026-03-08 17:19:52",
+  "success": false,
+  "attempt": "1/3",
+  "duration_ms": 60012,
+  "path": "flood",
+  "error": "No telemetry response (timeout)"
+}
+```
+
 ### Services Page (Web Viewer)
 
 New `/services` page in the web viewer for managing service plugins:

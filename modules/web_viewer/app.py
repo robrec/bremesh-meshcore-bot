@@ -106,6 +106,9 @@ class BotDataViewer:
         # Start HBME service polling for real-time packet monitor
         self._start_hbme_polling()
         
+        # Start telemetry polling for real-time WebSocket updates
+        self._start_telemetry_polling()
+
         # Start periodic cleanup
         self._start_cleanup_scheduler()
         
@@ -2657,6 +2660,19 @@ class BotDataViewer:
             except Exception as e:
                 self.logger.error(f"Error in handle_subscribe_hbme: {e}", exc_info=True)
 
+        @self.socketio.on('subscribe_telemetry')
+        def handle_subscribe_telemetry():
+            """Handle telemetry stream subscription"""
+            try:
+                client_id = getattr(request, 'sid', None)
+                with self._clients_lock:
+                    if client_id and client_id in self.connected_clients:
+                        self.connected_clients[client_id]['subscribed_telemetry'] = True
+                emit('status', {'message': 'Subscribed to telemetry stream'})
+                self.logger.debug(f"Client {client_id} subscribed to telemetry stream")
+            except Exception as e:
+                self.logger.error(f"Error in handle_subscribe_telemetry: {e}", exc_info=True)
+
         @self.socketio.on('ping')
         def handle_ping():
             """Handle client ping (modern ping/pong pattern)"""
@@ -2881,6 +2897,114 @@ class BotDataViewer:
         polling_thread.start()
         self.logger.info("Database polling started")
     
+    def _start_telemetry_polling(self):
+        """Start background thread to poll telemetry DB for new readings and broadcast via WebSocket."""
+        import threading
+
+        def poll_telemetry():
+            import time
+            import json
+
+            last_reading_id = 0
+            last_poll_id = 0
+
+            while True:
+                try:
+                    # Check if any client is subscribed
+                    has_subscribers = False
+                    with self._clients_lock:
+                        has_subscribers = any(
+                            c.get('subscribed_telemetry', False)
+                            for c in self.connected_clients.values()
+                        )
+                    if not has_subscribers:
+                        time.sleep(5)
+                        continue
+
+                    db_path = self.services_api._get_telemetry_db_path()
+                    if not os.path.exists(db_path):
+                        time.sleep(5)
+                        continue
+
+                    conn = self.services_api._get_telemetry_db()
+                    cursor = conn.cursor()
+
+                    # New telemetry readings
+                    try:
+                        cursor.execute('''
+                            SELECT id, repeater_name, timestamp, temperature, humidity,
+                                   pressure, battery_voltage, battery_percent,
+                                   latitude, longitude, altitude, raw_data,
+                                   request_duration_ms
+                            FROM telemetry_readings
+                            WHERE id > ? AND success = 1
+                            ORDER BY id ASC
+                        ''', (last_reading_id,))
+                        for row in cursor.fetchall():
+                            last_reading_id = row['id']
+                            raw_data = None
+                            if row['raw_data']:
+                                try:
+                                    raw_data = json.loads(row['raw_data'])
+                                except (json.JSONDecodeError, TypeError):
+                                    pass
+                            payload = {
+                                'type': 'reading',
+                                'repeater': row['repeater_name'],
+                                'timestamp': row['timestamp'],
+                                'duration_ms': row['request_duration_ms'],
+                                'temperature': row['temperature'],
+                                'humidity': row['humidity'],
+                                'pressure': row['pressure'],
+                                'battery_voltage': row['battery_voltage'],
+                                'battery_percent': row['battery_percent'],
+                                'latitude': row['latitude'],
+                                'longitude': row['longitude'],
+                                'altitude': row['altitude'],
+                                'raw_data': raw_data,
+                            }
+                            self.socketio.emit('telemetry_data', payload)
+                    except sqlite3.OperationalError:
+                        pass
+
+                    # New poll attempts (success + failure)
+                    try:
+                        cursor.execute('''
+                            SELECT id, repeater_name, timestamp, success,
+                                   error_message, duration_ms,
+                                   attempt_number, max_attempts, path_mode
+                            FROM poll_attempts
+                            WHERE id > ?
+                            ORDER BY id ASC
+                        ''', (last_poll_id,))
+                        for row in cursor.fetchall():
+                            last_poll_id = row['id']
+                            payload = {
+                                'type': 'poll_attempt',
+                                'repeater': row['repeater_name'],
+                                'timestamp': row['timestamp'],
+                                'success': bool(row['success']),
+                                'attempt': f"{row['attempt_number']}/{row['max_attempts']}",
+                                'duration_ms': row['duration_ms'],
+                                'path': row['path_mode'],
+                            }
+                            if not row['success'] and row['error_message']:
+                                payload['error'] = row['error_message']
+                            self.socketio.emit('telemetry_data', payload)
+                    except sqlite3.OperationalError:
+                        pass
+
+                    conn.close()
+                    time.sleep(3)
+
+                except Exception as e:
+                    self.logger.debug(f"Telemetry polling error: {e}")
+                    time.sleep(5)
+
+        t = threading.Thread(target=poll_telemetry, daemon=True)
+        t.start()
+        self.logger.info("Telemetry WebSocket polling started")
+
     def _start_hbme_polling(self):
         """Start background thread to poll HBME packet data and push via WebSocket"""
         import threading
