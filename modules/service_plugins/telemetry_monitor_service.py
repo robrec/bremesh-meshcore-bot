@@ -597,8 +597,13 @@ class TelemetryMonitorService(BaseServicePlugin):
 
         # Wait for initial delay, checking for ad-hoc requests every 5s
         remaining = initial_delay
+        reload_counter = 0
         while remaining > 0 and not self._stop_event.is_set():
             await self._process_adhoc_requests()
+            reload_counter += 5
+            if reload_counter >= 30:
+                self._load_repeaters_from_db()
+                reload_counter = 0
             try:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=min(5, remaining))
                 return
@@ -619,8 +624,16 @@ class TelemetryMonitorService(BaseServicePlugin):
                                 repeaters_completed=0, repeaters_total=len(self.repeaters))
 
             wait_seconds = self.poll_interval_minutes * 60
+            reload_counter = 0
             while wait_seconds > 0 and not self._stop_event.is_set():
                 await self._process_adhoc_requests()
+                reload_counter += 5
+                if reload_counter >= 30:
+                    self._load_repeaters_from_db()
+                    self._update_status('waiting', current_repeater=None,
+                                        next_poll_time=next_poll.strftime('%Y-%m-%d %H:%M:%S'),
+                                        repeaters_total=len(self.repeaters))
+                    reload_counter = 0
                 try:
                     await asyncio.wait_for(self._stop_event.wait(), timeout=min(5, wait_seconds))
                     break
