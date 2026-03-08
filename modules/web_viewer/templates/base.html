@@ -404,6 +404,13 @@
                             <i class="fas fa-plug"></i> Services
                         </a>
                     </li>
+                    {% if telemetry_enabled %}
+                    <li class="nav-item">
+                        <a class="nav-link" href="/telemetry">
+                            <i class="fas fa-battery-half"></i> Telemetry
+                        </a>
+                    </li>
+                    {% endif %}
                 </ul>
                 
                 <!-- Dark Mode Toggle and Connection Status -->

@@ -227,15 +227,20 @@ class BotDataViewer:
                     bot_name = (self.config.get('Bot', 'bot_name', fallback='MeshCore Bot') or '').strip() or 'MeshCore Bot'
                 except (configparser.NoSectionError, configparser.NoOptionError):
                     bot_name = 'MeshCore Bot'
+                try:
+                    telemetry_enabled = self.config.getboolean('TelemetryMonitor', 'enabled', fallback=False)
+                except (configparser.NoSectionError, configparser.NoOptionError, ValueError, TypeError):
+                    telemetry_enabled = False
                 return dict(
                     greeter_enabled=greeter_enabled,
                     feed_manager_enabled=feed_manager_enabled,
                     bot_name=bot_name,
                     version_info=version_info,
+                    telemetry_enabled=telemetry_enabled,
                 )
             except Exception as e:
                 self.logger.exception("Template context processor failed: %s", e)
-                return dict(greeter_enabled=False, feed_manager_enabled=False, bot_name='MeshCore Bot', version_info=version_info)
+                return dict(greeter_enabled=False, feed_manager_enabled=False, bot_name='MeshCore Bot', version_info=version_info, telemetry_enabled=False)
     
     def _get_db_path(self):
         """Get the database path, falling back to [Bot] db_path if [Web_Viewer] db_path is unset"""
@@ -1147,6 +1152,11 @@ class BotDataViewer:
         def services():
             """External services configuration page"""
             return render_template('services.html')
+        
+        @self.app.route('/telemetry')
+        def telemetry():
+            """Telemetry monitor configuration page"""
+            return render_template('telemetry.html')
         
         # Favicon routes
         @self.app.route('/apple-touch-icon.png')

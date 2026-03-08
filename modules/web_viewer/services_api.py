@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
 Services API Module
-Handles API endpoints for external service integrations (HBME Ingestor, etc.)
+Handles API endpoints for external service integrations (HBME Ingestor, Telemetry, etc.)
 """
 
 import asyncio
+import json
+import os
+import sqlite3
 from datetime import datetime
 from flask import jsonify, request
 
@@ -86,6 +89,90 @@ class ServicesAPI:
         def api_hbme_clear_error():
             """Clear last error."""
             return self._clear_hbme_error()
+        
+        # ─────────────────────────────────────────────────────────────────────
+        # Telemetry Monitor Service
+        # ─────────────────────────────────────────────────────────────────────
+        
+        @self.app.route('/api/telemetry/status')
+        def api_telemetry_status():
+            """Get telemetry monitor service status."""
+            return jsonify(self._get_telemetry_status())
+        
+        @self.app.route('/api/telemetry/readings')
+        def api_telemetry_readings():
+            """Get latest telemetry readings."""
+            return jsonify({'readings': self._get_telemetry_readings()})
+        
+        @self.app.route('/api/telemetry/poll-history')
+        def api_telemetry_poll_history():
+            """Get recent poll attempts."""
+            return jsonify({'history': self._get_telemetry_poll_history()})
+        
+        @self.app.route('/api/telemetry/repeaters')
+        def api_telemetry_repeaters():
+            """Get list of monitored repeaters."""
+            return jsonify(self._get_monitored_repeaters())
+        
+        @self.app.route('/api/telemetry/repeaters', methods=['POST'])
+        def api_telemetry_repeaters_add():
+            """Add a new repeater to monitoring list."""
+            data = request.get_json()
+            if not data or not data.get('name'):
+                return jsonify({'success': False, 'error': 'Name required'}), 400
+            return jsonify(self._add_monitored_repeater(data['name'].strip()))
+        
+        @self.app.route('/api/telemetry/repeaters/<int:repeater_id>', methods=['DELETE'])
+        def api_telemetry_repeaters_delete(repeater_id):
+            """Remove a repeater from monitoring list."""
+            return jsonify(self._delete_monitored_repeater(repeater_id))
+        
+        @self.app.route('/api/telemetry/repeaters/<int:repeater_id>/toggle', methods=['POST'])
+        def api_telemetry_repeaters_toggle(repeater_id):
+            """Toggle repeater enabled state."""
+            return jsonify(self._toggle_monitored_repeater(repeater_id))
+        
+        @self.app.route('/api/telemetry/poll-now/<path:repeater_name>', methods=['POST'])
+        def api_telemetry_poll_now(repeater_name):
+            """Trigger ad-hoc poll for a specific repeater."""
+            data = request.get_json() or {}
+            path_mode = data.get('path', 'flood')
+            return jsonify(self._trigger_poll(repeater_name, path_mode))
+        
+        @self.app.route('/api/telemetry/poll-all', methods=['POST'])
+        def api_telemetry_poll_all():
+            """Trigger ad-hoc poll for all repeaters."""
+            data = request.get_json() or {}
+            path_mode = data.get('path', 'flood')
+            return jsonify(self._trigger_poll_all(path_mode))
+        
+        @self.app.route('/api/telemetry/webhook/config')
+        def api_telemetry_webhook_config():
+            """Get webhook configuration."""
+            return jsonify(self._get_webhook_config())
+        
+        @self.app.route('/api/telemetry/webhook/config', methods=['POST'])
+        def api_telemetry_webhook_save():
+            """Save webhook configuration."""
+            data = request.get_json()
+            if not data:
+                return jsonify({'success': False, 'error': 'No data'}), 400
+            return jsonify(self._save_webhook_config(data))
+        
+        @self.app.route('/api/telemetry/webhook/test', methods=['POST'])
+        def api_telemetry_webhook_test():
+            """Test webhook with a test payload."""
+            return jsonify(self._test_webhook())
+        
+        @self.app.route('/api/telemetry/webhook/log')
+        def api_telemetry_webhook_log():
+            """Get webhook log entries."""
+            return jsonify({'log': self._get_webhook_log()})
+        
+        @self.app.route('/api/telemetry/available-contacts')
+        def api_telemetry_available_contacts():
+            """Get known contacts for repeater selection."""
+            return jsonify({'contacts': self._get_available_contacts()})
         
         # ─────────────────────────────────────────────────────────────────────
         # General Services Overview
@@ -618,6 +705,17 @@ class ServicesAPI:
                 'icon': 'fa-broadcast-tower'
             })
             
+            # Telemetry Monitor
+            telemetry_status = self._get_telemetry_status()
+            services.append({
+                'id': 'telemetry',
+                'name': 'Telemetry Monitor',
+                'description': 'Fragt Repeater-Telemetrie ab (Batterie, Temperatur, etc.)',
+                'enabled': telemetry_status.get('enabled', False),
+                'running': telemetry_status.get('running', False),
+                'icon': 'fa-battery-half'
+            })
+            
             return jsonify({
                 'services': services,
                 'total': len(services),
@@ -626,3 +724,495 @@ class ServicesAPI:
         except Exception as e:
             self.logger.error(f"Error getting services overview: {e}")
             return jsonify({'error': str(e)}), 500
+    
+    # ─────────────────────────────────────────────────────────────────────────
+    # Telemetry Monitor Methods
+    # ─────────────────────────────────────────────────────────────────────────
+    
+    def _get_telemetry_db_path(self) -> str:
+        """Resolve the telemetry database path from config."""
+        import configparser
+        config = configparser.ConfigParser()
+        # Get the config path from the app instance
+        config_path = getattr(self.app, '_config_path', None)
+        if not config_path:
+            # Fallback: resolve from bot root
+            bot_root = os.path.join(os.path.dirname(__file__), '..', '..')
+            config_path = os.path.join(bot_root, 'config.ini')
+        config.read(config_path, encoding='utf-8')
+        
+        db_path = config.get('TelemetryMonitor', 'database_path', fallback='telemetry_data.db')
+        if not os.path.isabs(db_path):
+            bot_root = os.path.join(os.path.dirname(__file__), '..', '..')
+            db_path = os.path.join(os.path.abspath(bot_root), db_path)
+        return db_path
+    
+    def _get_telemetry_db(self) -> sqlite3.Connection:
+        """Open a connection to the telemetry database."""
+        db_path = self._get_telemetry_db_path()
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        conn.row_factory = sqlite3.Row
+        return conn
+    
+    def _get_telemetry_config(self) -> dict:
+        """Read TelemetryMonitor config section."""
+        import configparser
+        config = configparser.ConfigParser()
+        config_path = getattr(self.app, '_config_path', None)
+        if not config_path:
+            bot_root = os.path.join(os.path.dirname(__file__), '..', '..')
+            config_path = os.path.join(bot_root, 'config.ini')
+        config.read(config_path, encoding='utf-8')
+        
+        if not config.has_section('TelemetryMonitor'):
+            return {'enabled': False}
+        
+        return {
+            'enabled': config.getboolean('TelemetryMonitor', 'enabled', fallback=False),
+            'poll_interval_minutes': config.getint('TelemetryMonitor', 'poll_interval_minutes', fallback=30),
+            'request_timeout': config.getint('TelemetryMonitor', 'request_timeout', fallback=60),
+            'max_retries': config.getint('TelemetryMonitor', 'max_retries', fallback=3),
+            'default_path_mode': config.get('TelemetryMonitor', 'default_path_mode', fallback='flood'),
+            'mqtt_enabled': config.getboolean('TelemetryMonitor', 'mqtt_enabled', fallback=False),
+            'mqtt_server': config.get('TelemetryMonitor', 'mqtt_server', fallback='localhost'),
+            'mqtt_port': config.getint('TelemetryMonitor', 'mqtt_port', fallback=1883),
+            'mqtt_topic_request': config.get('TelemetryMonitor', 'mqtt_topic_request', fallback='meshcore/telemetry/request'),
+            'mqtt_topic_response': config.get('TelemetryMonitor', 'mqtt_topic_response', fallback='meshcore/telemetry/response'),
+        }
+    
+    def _get_telemetry_status(self) -> dict:
+        """Get telemetry monitor service status."""
+        status = {
+            'enabled': False,
+            'running': False,
+            'repeaters': [],
+            'poll_interval_minutes': 30,
+            'next_poll': None,
+            'current_status': 'unknown',
+            'current_repeater': None,
+            'current_attempt': None,
+            'max_attempts': 3,
+            'repeaters_completed': 0,
+            'repeaters_total': 0,
+            'last_poll_time': None,
+            'total_readings': 0,
+            'successful_polls': 0,
+            'failed_polls': 0,
+            'mqtt_enabled': False,
+            'webhook_enabled': False,
+        }
+        
+        try:
+            cfg = self._get_telemetry_config()
+            status['enabled'] = cfg.get('enabled', False)
+            status['poll_interval_minutes'] = cfg.get('poll_interval_minutes', 30)
+            status['mqtt_enabled'] = cfg.get('mqtt_enabled', False)
+            status['running'] = cfg.get('enabled', False)
+            
+            db_path = self._get_telemetry_db_path()
+            if not os.path.exists(db_path):
+                return status
+            
+            conn = self._get_telemetry_db()
+            cursor = conn.cursor()
+            
+            # Repeaters
+            try:
+                cursor.execute('SELECT name FROM monitored_repeaters WHERE enabled = 1 ORDER BY sort_order, id')
+                status['repeaters'] = [row['name'] for row in cursor.fetchall()]
+            except sqlite3.OperationalError:
+                pass
+            
+            # Live status
+            try:
+                cursor.execute('''
+                    SELECT status, current_repeater, current_attempt, max_attempts,
+                           last_update, next_poll_time, repeaters_completed, repeaters_total
+                    FROM service_status WHERE id = 1
+                ''')
+                row = cursor.fetchone()
+                if row:
+                    status['current_status'] = row['status']
+                    status['current_repeater'] = row['current_repeater']
+                    status['current_attempt'] = row['current_attempt']
+                    status['max_attempts'] = row['max_attempts'] or 3
+                    status['next_poll'] = row['next_poll_time']
+                    status['repeaters_completed'] = row['repeaters_completed'] or 0
+                    status['repeaters_total'] = row['repeaters_total'] or len(status['repeaters'])
+            except sqlite3.OperationalError:
+                pass
+            
+            # Stats
+            try:
+                cursor.execute('SELECT COUNT(*) as cnt FROM telemetry_readings')
+                status['total_readings'] = cursor.fetchone()['cnt']
+            except sqlite3.OperationalError:
+                pass
+            
+            try:
+                cursor.execute('''
+                    SELECT
+                        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as ok,
+                        SUM(CASE WHEN success = 0 AND attempt_number >= max_attempts THEN 1 ELSE 0 END) as failed,
+                        MAX(timestamp) as last_poll
+                    FROM poll_attempts
+                ''')
+                row = cursor.fetchone()
+                if row:
+                    status['successful_polls'] = row['ok'] or 0
+                    status['failed_polls'] = row['failed'] or 0
+                    status['last_poll_time'] = row['last_poll']
+            except sqlite3.OperationalError:
+                pass
+            
+            # Webhook status
+            try:
+                cursor.execute('SELECT enabled FROM webhook_config WHERE id = 1')
+                wh = cursor.fetchone()
+                if wh:
+                    status['webhook_enabled'] = bool(wh['enabled'])
+            except sqlite3.OperationalError:
+                pass
+            
+            conn.close()
+        except Exception as e:
+            self.logger.error(f"Error getting telemetry status: {e}")
+        
+        return status
+    
+    def _get_telemetry_readings(self) -> list:
+        """Get latest telemetry readings."""
+        try:
+            db_path = self._get_telemetry_db_path()
+            if not os.path.exists(db_path):
+                return []
+            conn = self._get_telemetry_db()
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT t1.* FROM telemetry_readings t1
+                INNER JOIN (
+                    SELECT repeater_name, MAX(timestamp) as max_ts
+                    FROM telemetry_readings WHERE success = 1
+                    GROUP BY repeater_name
+                ) t2 ON t1.repeater_name = t2.repeater_name AND t1.timestamp = t2.max_ts
+                ORDER BY t1.repeater_name
+            ''')
+            readings = [dict(row) for row in cursor.fetchall()]
+            conn.close()
+            return readings
+        except Exception as e:
+            self.logger.error(f"Error getting telemetry readings: {e}")
+            return []
+    
+    def _get_telemetry_poll_history(self, limit: int = 50) -> list:
+        """Get recent poll attempts."""
+        try:
+            db_path = self._get_telemetry_db_path()
+            if not os.path.exists(db_path):
+                return []
+            conn = self._get_telemetry_db()
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM poll_attempts ORDER BY timestamp DESC LIMIT ?', (limit,))
+            history = [dict(row) for row in cursor.fetchall()]
+            conn.close()
+            return history
+        except Exception as e:
+            self.logger.error(f"Error getting poll history: {e}")
+            return []
+    
+    def _get_monitored_repeaters(self) -> dict:
+        """Get list of monitored repeaters from DB."""
+        try:
+            db_path = self._get_telemetry_db_path()
+            if not os.path.exists(db_path):
+                return {'repeaters': [], 'success': True}
+            conn = self._get_telemetry_db()
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM monitored_repeaters ORDER BY sort_order, id')
+            repeaters = [dict(row) for row in cursor.fetchall()]
+            conn.close()
+            return {'repeaters': repeaters, 'success': True}
+        except Exception as e:
+            self.logger.error(f"Error getting repeaters: {e}")
+            return {'repeaters': [], 'success': False, 'error': str(e)}
+    
+    def _add_monitored_repeater(self, name: str) -> dict:
+        """Add a new repeater to monitoring list."""
+        try:
+            db_path = self._get_telemetry_db_path()
+            if not os.path.exists(db_path):
+                return {'success': False, 'error': 'Telemetry DB not initialized. Enable service first.'}
+            conn = self._get_telemetry_db()
+            cursor = conn.cursor()
+            # Get max sort_order
+            cursor.execute('SELECT COALESCE(MAX(sort_order), 0) + 1 as next_order FROM monitored_repeaters')
+            next_order = cursor.fetchone()['next_order']
+            cursor.execute(
+                'INSERT INTO monitored_repeaters (name, sort_order) VALUES (?, ?)',
+                (name, next_order))
+            conn.commit()
+            repeater_id = cursor.lastrowid
+            conn.close()
+            return {'success': True, 'id': repeater_id, 'message': f'Repeater "{name}" hinzugefuegt'}
+        except sqlite3.IntegrityError:
+            return {'success': False, 'error': f'Repeater "{name}" existiert bereits'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def _delete_monitored_repeater(self, repeater_id: int) -> dict:
+        """Remove a repeater from monitoring list."""
+        try:
+            db_path = self._get_telemetry_db_path()
+            if not os.path.exists(db_path):
+                return {'success': False, 'error': 'DB not found'}
+            conn = self._get_telemetry_db()
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM monitored_repeaters WHERE id = ?', (repeater_id,))
+            conn.commit()
+            deleted = cursor.rowcount > 0
+            conn.close()
+            return {'success': deleted}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def _toggle_monitored_repeater(self, repeater_id: int) -> dict:
+        """Toggle repeater enabled state."""
+        try:
+            db_path = self._get_telemetry_db_path()
+            if not os.path.exists(db_path):
+                return {'success': False, 'error': 'DB not found'}
+            conn = self._get_telemetry_db()
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE monitored_repeaters
+                SET enabled = CASE WHEN enabled = 1 THEN 0 ELSE 1 END
+                WHERE id = ?
+            ''', (repeater_id,))
+            conn.commit()
+            cursor.execute('SELECT enabled FROM monitored_repeaters WHERE id = ?', (repeater_id,))
+            row = cursor.fetchone()
+            conn.close()
+            if row:
+                return {'success': True, 'enabled': bool(row['enabled'])}
+            return {'success': False, 'error': 'Not found'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def _trigger_poll(self, repeater_name: str, path_mode: str = 'flood') -> dict:
+        """Insert an ad-hoc poll request for a single repeater."""
+        try:
+            db_path = self._get_telemetry_db_path()
+            if not os.path.exists(db_path):
+                return {'success': False, 'error': 'Telemetry DB not found'}
+            conn = self._get_telemetry_db()
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS adhoc_poll_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    repeater_name TEXT NOT NULL,
+                    requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    status TEXT DEFAULT 'pending',
+                    result TEXT,
+                    completed_at TIMESTAMP,
+                    path_mode TEXT DEFAULT 'flood',
+                    source TEXT DEFAULT 'webui'
+                )
+            ''')
+            cursor.execute('''
+                INSERT INTO adhoc_poll_requests (repeater_name, status, path_mode, source)
+                VALUES (?, 'pending', ?, 'webui')
+            ''', (repeater_name, path_mode))
+            conn.commit()
+            req_id = cursor.lastrowid
+            conn.close()
+            return {'success': True, 'request_id': req_id,
+                    'message': f'Poll gestartet fuer {repeater_name}'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def _trigger_poll_all(self, path_mode: str = 'flood') -> dict:
+        """Insert ad-hoc poll requests for all enabled repeaters."""
+        try:
+            db_path = self._get_telemetry_db_path()
+            if not os.path.exists(db_path):
+                return {'success': False, 'error': 'Telemetry DB not found'}
+            conn = self._get_telemetry_db()
+            cursor = conn.cursor()
+            cursor.execute('SELECT name FROM monitored_repeaters WHERE enabled = 1 ORDER BY sort_order, id')
+            repeaters = [row['name'] for row in cursor.fetchall()]
+            if not repeaters:
+                conn.close()
+                return {'success': False, 'error': 'Keine Repeater konfiguriert'}
+            request_ids = []
+            for name in repeaters:
+                cursor.execute('''
+                    INSERT INTO adhoc_poll_requests (repeater_name, status, path_mode, source)
+                    VALUES (?, 'pending', ?, 'webui')
+                ''', (name, path_mode))
+                request_ids.append(cursor.lastrowid)
+            conn.commit()
+            conn.close()
+            return {'success': True, 'repeaters': repeaters, 'request_ids': request_ids,
+                    'message': f'Poll gestartet fuer {len(repeaters)} Repeater'}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def _get_webhook_config(self) -> dict:
+        """Get webhook configuration from telemetry DB."""
+        try:
+            db_path = self._get_telemetry_db_path()
+            if not os.path.exists(db_path):
+                return {'enabled': False, 'url': '', 'interval_minutes': 0,
+                        'on_threshold': True, 'battery_threshold': 20.0}
+            conn = self._get_telemetry_db()
+            cursor = conn.cursor()
+            try:
+                cursor.execute('SELECT * FROM webhook_config WHERE id = 1')
+                row = cursor.fetchone()
+                conn.close()
+                if row:
+                    return {
+                        'enabled': bool(row['enabled']),
+                        'url': row['url'] or '',
+                        'interval_minutes': row['interval_minutes'] or 0,
+                        'on_threshold': bool(row['on_threshold']),
+                        'battery_threshold': row['battery_threshold'] or 20.0,
+                        'last_sent': row['last_sent'],
+                        'last_error': row['last_error'],
+                    }
+            except sqlite3.OperationalError:
+                conn.close()
+            return {'enabled': False, 'url': '', 'interval_minutes': 0,
+                    'on_threshold': True, 'battery_threshold': 20.0}
+        except Exception as e:
+            self.logger.error(f"Error getting webhook config: {e}")
+            return {'enabled': False, 'url': '', 'interval_minutes': 0,
+                    'on_threshold': True, 'battery_threshold': 20.0}
+    
+    def _save_webhook_config(self, data: dict) -> dict:
+        """Save webhook configuration to telemetry DB."""
+        try:
+            db_path = self._get_telemetry_db_path()
+            if not os.path.exists(db_path):
+                return {'success': False, 'error': 'Telemetry DB not initialized'}
+            
+            # Validate URL if provided
+            url = data.get('url', '').strip()
+            if url and not url.startswith(('http://', 'https://')):
+                return {'success': False, 'error': 'URL muss mit http:// oder https:// beginnen'}
+            
+            conn = self._get_telemetry_db()
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE webhook_config SET
+                    enabled = ?,
+                    url = ?,
+                    interval_minutes = ?,
+                    on_threshold = ?,
+                    battery_threshold = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = 1
+            ''', (
+                int(data.get('enabled', False)),
+                url,
+                int(data.get('interval_minutes', 0)),
+                int(data.get('on_threshold', True)),
+                float(data.get('battery_threshold', 20.0)),
+            ))
+            conn.commit()
+            conn.close()
+            return {'success': True, 'message': 'Webhook-Konfiguration gespeichert'}
+        except Exception as e:
+            self.logger.error(f"Error saving webhook config: {e}")
+            return {'success': False, 'error': str(e)}
+    
+    def _test_webhook(self) -> dict:
+        """Send a test payload to the configured webhook URL."""
+        import time
+        try:
+            wh = self._get_webhook_config()
+            url = wh.get('url', '').strip()
+            if not url:
+                return {'success': False, 'error': 'Keine Webhook-URL konfiguriert'}
+            
+            test_payload = {
+                'trigger': 'test',
+                'triggered_by': 'WebUI Test',
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'readings': [],
+                'message': 'This is a test webhook from MeshCore Bot Telemetry Monitor',
+            }
+            
+            import urllib.request
+            body = json.dumps(test_payload).encode('utf-8')
+            req = urllib.request.Request(
+                url, data=body,
+                headers={'Content-Type': 'application/json'},
+                method='POST')
+            
+            start = time.time()
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    status_code = resp.getcode()
+                    elapsed = int((time.time() - start) * 1000)
+                    success = 200 <= status_code < 300
+                    return {
+                        'success': success,
+                        'status_code': status_code,
+                        'response_time': elapsed,
+                        'message': f'HTTP {status_code} ({elapsed}ms)' if success else f'Fehler: HTTP {status_code}'
+                    }
+            except Exception as e:
+                elapsed = int((time.time() - start) * 1000)
+                return {'success': False, 'error': str(e), 'response_time': elapsed}
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    def _get_webhook_log(self, limit: int = 20) -> list:
+        """Get recent webhook log entries."""
+        try:
+            db_path = self._get_telemetry_db_path()
+            if not os.path.exists(db_path):
+                return []
+            conn = self._get_telemetry_db()
+            cursor = conn.cursor()
+            try:
+                cursor.execute('SELECT * FROM webhook_log ORDER BY timestamp DESC LIMIT ?', (limit,))
+                log = [dict(row) for row in cursor.fetchall()]
+            except sqlite3.OperationalError:
+                log = []
+            conn.close()
+            return log
+        except Exception as e:
+            self.logger.error(f"Error getting webhook log: {e}")
+            return []
+    
+    def _get_available_contacts(self) -> list:
+        """Get known contacts for repeater selection dropdown."""
+        try:
+            contacts = []
+            # From bot DB complete_contact_tracking
+            db_path = self.db_manager.db_path if hasattr(self.db_manager, 'db_path') else None
+            if db_path and os.path.exists(db_path):
+                conn = sqlite3.connect(db_path, timeout=5.0)
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                try:
+                    cursor.execute('''
+                        SELECT DISTINCT name, public_key
+                        FROM complete_contact_tracking
+                        WHERE name IS NOT NULL AND name != ''
+                        ORDER BY name
+                    ''')
+                    for row in cursor.fetchall():
+                        contacts.append({
+                            'name': row['name'],
+                            'public_key': row['public_key'][:12] + '...' if row['public_key'] else None
+                        })
+                except sqlite3.OperationalError:
+                    pass
+                conn.close()
+            return contacts
+        except Exception as e:
+            self.logger.error(f"Error getting available contacts: {e}")
+            return []

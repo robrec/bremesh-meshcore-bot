@@ -1,0 +1,670 @@
+{% extends "base.html" %}
+
+{% block title %}Telemetry Monitor - MeshCore Bot{% endblock %}
+
+{% block extra_css %}
+<style>
+    /* ── Telemetry Page ───────────────────────────────────────────── */
+    .telemetry-hero {
+        background: linear-gradient(135deg, rgba(13, 110, 253, 0.08) 0%, rgba(13, 110, 253, 0.02) 100%);
+        border: 1px solid var(--border-color);
+        border-radius: 12px;
+        padding: 1.5rem;
+        margin-bottom: 1.5rem;
+    }
+    [data-theme="dark"] .telemetry-hero {
+        background: linear-gradient(135deg, rgba(13, 110, 253, 0.12) 0%, rgba(13, 110, 253, 0.03) 100%);
+    }
+
+    .stat-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.4rem 0.9rem;
+        border-radius: 20px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color);
+    }
+    .stat-pill .stat-value { font-size: 1.1rem; }
+    .stat-pill.success { border-color: #198754; color: #198754; }
+    .stat-pill.danger  { border-color: #dc3545; color: #dc3545; }
+    .stat-pill.info    { border-color: #0dcaf0; color: #0d6efd; }
+    .stat-pill.warning { border-color: #ffc107; color: #856404; }
+    [data-theme="dark"] .stat-pill.success { color: #75b798; border-color: #75b798; }
+    [data-theme="dark"] .stat-pill.danger  { color: #ea868f; border-color: #ea868f; }
+    [data-theme="dark"] .stat-pill.info    { color: #6ea8fe; border-color: #6ea8fe; }
+    [data-theme="dark"] .stat-pill.warning { color: #ffda6a; border-color: #ffda6a; }
+
+    .battery-bar {
+        height: 20px;
+        border-radius: 4px;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-color);
+        overflow: hidden;
+        min-width: 80px;
+    }
+    .battery-bar .fill {
+        height: 100%;
+        transition: width 0.3s ease;
+    }
+    .battery-good .fill    { background: #198754; }
+    .battery-warning .fill { background: #ffc107; }
+    .battery-danger .fill  { background: #dc3545; }
+
+    .collapsible-header { cursor: pointer; user-select: none; }
+    .collapsible-header:hover { opacity: 0.85; }
+
+    .webhook-log-table td { font-size: 0.8rem; padding: 0.3rem 0.5rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="row">
+        <div class="col-12">
+
+            <!-- Hero -->
+            <div class="telemetry-hero">
+                <div class="d-flex justify-content-between align-items-start flex-wrap gap-2">
+                    <div>
+                        <h4 class="mb-1"><i class="fas fa-battery-half me-2"></i>Telemetry Monitor</h4>
+                        <p class="text-muted mb-2 small">
+                            Periodische Telemetrie-Abfrage der Repeater &ndash; Batterie, Temperatur, Luftfeuchtigkeit.
+                        </p>
+                        <div class="d-flex flex-wrap gap-2" id="hero-stats">
+                            <span class="stat-pill" id="hero-status"><i class="fas fa-circle-notch fa-spin"></i> Laden&hellip;</span>
+                        </div>
+                    </div>
+                    <div class="d-flex gap-2">
+                        <button class="btn btn-sm btn-outline-success" id="pollAllBtn" onclick="pollAll()">
+                            <i class="fas fa-satellite-dish me-1"></i>Alle abfragen
+                        </button>
+                        <button class="btn btn-sm btn-outline-primary" onclick="refreshAll()">
+                            <i class="fas fa-sync-alt me-1"></i>Aktualisieren
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ 1. Aktuelle Aktivität ═══ -->
+            <div class="card mb-3">
+                <div class="card-header py-2">
+                    <h6 class="mb-0"><i class="fas fa-sync-alt me-1"></i>Aktuelle Aktivität</h6>
+                </div>
+                <div class="card-body py-2">
+                    <div class="row small">
+                        <div class="col-md-6">
+                            <p class="mb-1"><strong>Status:</strong> <span id="current-state" class="badge bg-secondary">-</span></p>
+                            <p class="mb-1"><strong>Aktueller Repeater:</strong> <span id="current-repeater">-</span></p>
+                            <p class="mb-1"><strong>Versuch:</strong> <span id="current-attempt">-</span></p>
+                        </div>
+                        <div class="col-md-6">
+                            <p class="mb-1"><strong>Letzter Poll:</strong> <span id="last-poll">-</span></p>
+                            <p class="mb-1"><strong>Nächster Poll:</strong> <span id="next-poll">-</span></p>
+                            <p class="mb-1"><strong>Erfolgsrate:</strong> <span id="success-rate">-</span></p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ 2. Repeater Übersicht (Readings) ═══ -->
+            <div class="card mb-3">
+                <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                    <h6 class="mb-0"><i class="fas fa-chart-line me-1"></i>Repeater Übersicht</h6>
+                    <button class="btn btn-sm btn-outline-primary" onclick="loadReadings()">
+                        <i class="fas fa-refresh"></i>
+                    </button>
+                </div>
+                <div class="card-body p-0">
+                    <div class="table-responsive">
+                        <table class="table table-striped table-hover mb-0">
+                            <thead class="table-dark">
+                                <tr>
+                                    <th>Repeater</th>
+                                    <th>Batterie</th>
+                                    <th>Temperatur</th>
+                                    <th>Feuchte</th>
+                                    <th>Druck</th>
+                                    <th>Aktualisiert</th>
+                                    <th>Aktion</th>
+                                </tr>
+                            </thead>
+                            <tbody id="readingsTableBody">
+                                <tr><td colspan="7" class="text-center text-muted py-3">Laden&hellip;</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ 3. Repeater Konfiguration (collapsible) ═══ -->
+            <div class="card mb-3">
+                <div class="card-header py-2 collapsible-header d-flex justify-content-between align-items-center"
+                     onclick="toggleSection('repeaterConfig')">
+                    <h6 class="mb-0"><i class="fas fa-cogs me-1"></i>Repeater Konfiguration</h6>
+                    <i class="fas fa-chevron-down" id="repeaterConfig-chevron"></i>
+                </div>
+                <div class="card-body" id="repeaterConfig-body" style="display:none;">
+                    <p class="text-muted small mb-2">
+                        Verwalte die Liste der Repeater, die periodisch abgefragt werden.
+                    </p>
+                    <div class="row g-2 align-items-end mb-3">
+                        <div class="col">
+                            <div class="input-group input-group-sm">
+                                <input type="text" class="form-control" id="new-repeater-input"
+                                       list="available-contacts-list"
+                                       placeholder="Repeater-Name eingeben oder aus Liste wählen&hellip;"
+                                       autocomplete="off">
+                                <datalist id="available-contacts-list"></datalist>
+                                <button class="btn btn-success" onclick="addRepeater()">
+                                    <i class="fas fa-plus me-1"></i>Hinzufügen
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-sm table-striped mb-0">
+                            <thead class="table-dark">
+                                <tr>
+                                    <th style="width:40px">#</th>
+                                    <th>Name</th>
+                                    <th style="width:90px">Status</th>
+                                    <th style="width:130px">Hinzugefügt</th>
+                                    <th style="width:110px">Aktionen</th>
+                                </tr>
+                            </thead>
+                            <tbody id="repeaterConfigBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ 4. Letzte Abfragen ═══ -->
+            <div class="card mb-3">
+                <div class="card-header py-2 collapsible-header d-flex justify-content-between align-items-center"
+                     onclick="toggleSection('pollHistory')">
+                    <h6 class="mb-0"><i class="fas fa-history me-1"></i>Letzte Abfragen</h6>
+                    <i class="fas fa-chevron-down" id="pollHistory-chevron"></i>
+                </div>
+                <div class="card-body p-0" id="pollHistory-body" style="display:none;">
+                    <div class="table-responsive">
+                        <table class="table table-sm mb-0">
+                            <thead>
+                                <tr>
+                                    <th>Zeit</th>
+                                    <th>Repeater</th>
+                                    <th>Status</th>
+                                    <th>Versuch</th>
+                                    <th>Details</th>
+                                </tr>
+                            </thead>
+                            <tbody id="pollHistoryBody">
+                                <tr><td colspan="5" class="text-center text-muted py-2">Laden&hellip;</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ 5. Webhook Konfiguration (collapsible) ═══ -->
+            <div class="card mb-3">
+                <div class="card-header py-2 collapsible-header d-flex justify-content-between align-items-center"
+                     onclick="toggleSection('webhookConfig')">
+                    <h6 class="mb-0"><i class="fas fa-paper-plane me-1"></i>Webhook Konfiguration</h6>
+                    <i class="fas fa-chevron-down" id="webhookConfig-chevron"></i>
+                </div>
+                <div class="card-body" id="webhookConfig-body" style="display:none;">
+                    <div class="row g-3">
+                        <div class="col-md-8">
+                            <label class="form-label small fw-bold">Webhook URL</label>
+                            <input type="url" class="form-control form-control-sm" id="webhook-url"
+                                   placeholder="https://example.com/webhook">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small fw-bold">Intervall (Minuten)</label>
+                            <input type="number" class="form-control form-control-sm" id="webhook-interval"
+                                   min="0" value="0" placeholder="0 = nur bei Threshold">
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small fw-bold">Batterie-Schwellenwert (V)</label>
+                            <input type="number" class="form-control form-control-sm" id="webhook-threshold"
+                                   min="0" step="0.1" value="20.0">
+                        </div>
+                        <div class="col-md-4 d-flex align-items-end gap-3">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="webhook-enabled">
+                                <label class="form-check-label small" for="webhook-enabled">Aktiviert</label>
+                            </div>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="webhook-on-threshold" checked>
+                                <label class="form-check-label small" for="webhook-on-threshold">Bei Schwellenwert</label>
+                            </div>
+                        </div>
+                        <div class="col-md-4 d-flex align-items-end gap-2">
+                            <button class="btn btn-sm btn-primary" onclick="saveWebhookConfig()">
+                                <i class="fas fa-save me-1"></i>Speichern
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary" onclick="testWebhook()" id="testWebhookBtn">
+                                <i class="fas fa-vial me-1"></i>Testen
+                            </button>
+                        </div>
+                    </div>
+                    <div id="webhook-test-result" class="mt-2"></div>
+
+                    <!-- Webhook Log -->
+                    <hr class="my-3">
+                    <h6 class="small fw-bold mb-2"><i class="fas fa-list me-1"></i>Webhook Log</h6>
+                    <div class="table-responsive" style="max-height: 200px; overflow-y: auto;">
+                        <table class="table table-sm webhook-log-table mb-0">
+                            <thead>
+                                <tr>
+                                    <th>Zeit</th>
+                                    <th>Trigger</th>
+                                    <th>Status</th>
+                                    <th>Details</th>
+                                </tr>
+                            </thead>
+                            <tbody id="webhookLogBody">
+                                <tr><td colspan="4" class="text-center text-muted">Laden&hellip;</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+/* ═══════════════════════════════════════════════════════════════════
+   Telemetry Monitor – Frontend Logic
+   ═══════════════════════════════════════════════════════════════════ */
+
+let autoRefreshTimer = null;
+
+/* ── Init ────────────────────────────────────────────────────────── */
+document.addEventListener('DOMContentLoaded', () => {
+    refreshAll();
+    autoRefreshTimer = setInterval(refreshAll, 30000);
+});
+
+function refreshAll() {
+    loadStatus();
+    loadReadings();
+    loadRepeaters();
+    loadPollHistory();
+    loadWebhookConfig();
+    loadWebhookLog();
+    loadAvailableContacts();
+}
+
+/* ── Toast helper ────────────────────────────────────────────────── */
+function toast(msg, type) {
+    if (typeof window.showToast === 'function') { window.showToast(msg, type); return; }
+    console.log(`[${type||'info'}] ${msg}`);
+}
+
+/* ── Collapsible sections ────────────────────────────────────────── */
+function toggleSection(id) {
+    const body = document.getElementById(id + '-body');
+    const chevron = document.getElementById(id + '-chevron');
+    if (!body) return;
+    const hidden = body.style.display === 'none';
+    body.style.display = hidden ? '' : 'none';
+    if (chevron) chevron.className = 'fas fa-chevron-' + (hidden ? 'up' : 'down');
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Status
+   ═══════════════════════════════════════════════════════════════════ */
+function loadStatus() {
+    fetch('/api/telemetry/status')
+        .then(r => r.json())
+        .then(data => {
+            // Hero stats
+            const heroEl = document.getElementById('hero-stats');
+            const statusClass = data.running ? 'success' : (data.enabled ? 'warning' : 'danger');
+            const statusText = data.running ? 'Aktiv' : (data.enabled ? 'Aktiviert' : 'Deaktiviert');
+            heroEl.innerHTML = `
+                <span class="stat-pill ${statusClass}"><i class="fas fa-circle me-1"></i>${statusText}</span>
+                <span class="stat-pill info"><span class="stat-value">${(data.repeaters||[]).length}</span> Repeater</span>
+                <span class="stat-pill info"><span class="stat-value">${data.poll_interval_minutes||'-'}</span> min Intervall</span>
+                <span class="stat-pill info"><span class="stat-value">${data.total_readings||0}</span> Messungen</span>
+                ${data.mqtt_enabled ? '<span class="stat-pill success"><i class="fas fa-plug me-1"></i>MQTT</span>' : ''}
+                ${data.webhook_enabled ? '<span class="stat-pill success"><i class="fas fa-paper-plane me-1"></i>Webhook</span>' : ''}
+            `;
+            // Activity
+            const stateMap = {idle:'Idle',polling:'Polling',waiting:'Wartend',error:'Fehler',starting:'Startet'};
+            const st = data.current_status || 'unknown';
+            const stBadge = st === 'polling' ? 'bg-primary' : (st === 'error' ? 'bg-danger' : 'bg-secondary');
+            document.getElementById('current-state').className = 'badge ' + stBadge;
+            document.getElementById('current-state').textContent = stateMap[st] || st;
+            document.getElementById('current-repeater').textContent = data.current_repeater || '-';
+            document.getElementById('current-attempt').textContent =
+                data.current_attempt ? `${data.current_attempt}/${data.max_attempts}` : '-';
+            document.getElementById('last-poll').textContent = data.last_poll_time ? formatTime(data.last_poll_time) : '-';
+            document.getElementById('next-poll').textContent = data.next_poll ? formatTime(data.next_poll) : '-';
+            const total = (data.successful_polls||0) + (data.failed_polls||0);
+            const rate = total > 0 ? ((data.successful_polls/total)*100).toFixed(0) + '%' : '-';
+            document.getElementById('success-rate').textContent = rate + (total > 0 ? ` (${data.successful_polls}/${total})` : '');
+        })
+        .catch(e => {
+            document.getElementById('hero-stats').innerHTML = '<span class="stat-pill danger">Fehler beim Laden</span>';
+        });
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Readings Table
+   ═══════════════════════════════════════════════════════════════════ */
+function loadReadings() {
+    fetch('/api/telemetry/readings')
+        .then(r => r.json())
+        .then(data => {
+            const tbody = document.getElementById('readingsTableBody');
+            const readings = data.readings || data || [];
+            if (!readings.length) {
+                tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">Keine Telemetriedaten vorhanden</td></tr>';
+                return;
+            }
+            tbody.innerHTML = readings.map(r => {
+                const batt = r.battery_voltage != null ? parseFloat(r.battery_voltage) : null;
+                const battHtml = batt != null ? batteryCell(batt) : '-';
+                const temp = r.temperature != null ? `${parseFloat(r.temperature).toFixed(1)} °C` : '-';
+                const hum = r.humidity != null ? `${parseFloat(r.humidity).toFixed(0)}%` : '-';
+                const press = r.pressure != null ? `${parseFloat(r.pressure).toFixed(0)} hPa` : '-';
+                const time = r.timestamp ? formatTime(r.timestamp) : '-';
+                return `<tr>
+                    <td><strong>${escHtml(r.repeater_name)}</strong></td>
+                    <td>${battHtml}</td>
+                    <td>${temp}</td>
+                    <td>${hum}</td>
+                    <td>${press}</td>
+                    <td><small>${time}</small></td>
+                    <td>
+                        <button class="btn btn-sm btn-outline-primary" onclick="pollNow('${escAttr(r.repeater_name)}')" title="Jetzt abfragen">
+                            <i class="fas fa-satellite-dish"></i>
+                        </button>
+                    </td>
+                </tr>`;
+            }).join('');
+        })
+        .catch(() => {
+            document.getElementById('readingsTableBody').innerHTML =
+                '<tr><td colspan="7" class="text-center text-danger">Fehler beim Laden</td></tr>';
+        });
+}
+
+function batteryCell(voltage) {
+    // Assume 3.0V = 0%, 4.2V = 100% (LiPo)
+    let pct = Math.min(100, Math.max(0, ((voltage - 3.0) / 1.2) * 100));
+    const cls = pct > 40 ? 'battery-good' : (pct > 15 ? 'battery-warning' : 'battery-danger');
+    return `<div class="d-flex align-items-center gap-2">
+        <div class="battery-bar ${cls}"><div class="fill" style="width:${pct.toFixed(0)}%"></div></div>
+        <small>${voltage.toFixed(2)}V</small>
+    </div>`;
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Repeater Config
+   ═══════════════════════════════════════════════════════════════════ */
+function loadRepeaters() {
+    fetch('/api/telemetry/repeaters')
+        .then(r => r.json())
+        .then(data => {
+            const repeaters = data.repeaters || [];
+            const tbody = document.getElementById('repeaterConfigBody');
+            if (!repeaters.length) {
+                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-2">Keine Repeater konfiguriert</td></tr>';
+                return;
+            }
+            tbody.innerHTML = repeaters.map((rep, i) => `<tr>
+                <td>${i + 1}</td>
+                <td>${escHtml(rep.name)}</td>
+                <td>
+                    <span class="badge ${rep.enabled ? 'bg-success' : 'bg-secondary'}" style="cursor:pointer"
+                          onclick="toggleRepeater(${rep.id})">${rep.enabled ? 'Aktiv' : 'Inaktiv'}</span>
+                </td>
+                <td><small>${rep.added_at ? formatTime(rep.added_at) : '-'}</small></td>
+                <td>
+                    <button class="btn btn-sm btn-outline-primary me-1" onclick="pollNow('${escAttr(rep.name)}')" title="Jetzt abfragen">
+                        <i class="fas fa-satellite-dish"></i>
+                    </button>
+                    <button class="btn btn-sm btn-outline-danger" onclick="deleteRepeater(${rep.id}, '${escAttr(rep.name)}')" title="Entfernen">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </td>
+            </tr>`).join('');
+        })
+        .catch(() => {});
+}
+
+function addRepeater() {
+    const input = document.getElementById('new-repeater-input');
+    const name = input.value.trim();
+    if (!name) return;
+    fetch('/api/telemetry/repeaters', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name})
+    })
+    .then(r => r.json())
+    .then(res => {
+        if (res.success) {
+            input.value = '';
+            loadRepeaters();
+            toast(res.message || 'Repeater hinzugefuegt');
+        } else {
+            toast(res.error || 'Fehler', 'error');
+        }
+    })
+    .catch(e => toast('Fehler: ' + e.message, 'error'));
+}
+
+function deleteRepeater(id, name) {
+    if (!confirm(`Repeater "${name}" wirklich entfernen?`)) return;
+    fetch(`/api/telemetry/repeaters/${id}`, {method: 'DELETE'})
+        .then(r => r.json())
+        .then(res => {
+            if (res.success) { loadRepeaters(); toast('Repeater entfernt'); }
+            else toast(res.error || 'Fehler', 'error');
+        })
+        .catch(e => toast('Fehler: ' + e.message, 'error'));
+}
+
+function toggleRepeater(id) {
+    fetch(`/api/telemetry/repeaters/${id}/toggle`, {method: 'POST'})
+        .then(r => r.json())
+        .then(res => {
+            if (res.success) loadRepeaters();
+            else toast(res.error || 'Fehler', 'error');
+        })
+        .catch(e => toast('Fehler: ' + e.message, 'error'));
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Polling
+   ═══════════════════════════════════════════════════════════════════ */
+function pollNow(name) {
+    fetch(`/api/telemetry/poll-now/${encodeURIComponent(name)}`, {method: 'POST'})
+        .then(r => r.json())
+        .then(res => {
+            if (res.success) toast(res.message || 'Poll gestartet');
+            else toast(res.error || 'Fehler', 'error');
+        })
+        .catch(e => toast('Fehler: ' + e.message, 'error'));
+}
+
+function pollAll() {
+    const btn = document.getElementById('pollAllBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Polling&hellip;';
+    fetch('/api/telemetry/poll-all', {method: 'POST'})
+        .then(r => r.json())
+        .then(res => {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-satellite-dish me-1"></i>Alle abfragen';
+            if (res.success) toast(res.message || 'Poll gestartet');
+            else toast(res.error || 'Fehler', 'error');
+        })
+        .catch(e => {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-satellite-dish me-1"></i>Alle abfragen';
+            toast('Fehler: ' + e.message, 'error');
+        });
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Poll History
+   ═══════════════════════════════════════════════════════════════════ */
+function loadPollHistory() {
+    fetch('/api/telemetry/poll-history')
+        .then(r => r.json())
+        .then(data => {
+            const history = data.history || data || [];
+            const tbody = document.getElementById('pollHistoryBody');
+            if (!history.length) {
+                tbody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-2">Keine Abfragen vorhanden</td></tr>';
+                return;
+            }
+            tbody.innerHTML = history.slice(0, 50).map(h => {
+                const badge = h.success ? 'bg-success' : 'bg-danger';
+                const icon = h.success ? 'fa-check' : 'fa-times';
+                return `<tr>
+                    <td><small>${formatTime(h.timestamp)}</small></td>
+                    <td>${escHtml(h.repeater_name)}</td>
+                    <td><span class="badge ${badge}"><i class="fas ${icon}"></i></span></td>
+                    <td>${h.attempt_number||'-'}/${h.max_attempts||'-'}</td>
+                    <td><small>${escHtml(h.error_message || h.path_mode || '-')}</small></td>
+                </tr>`;
+            }).join('');
+        })
+        .catch(() => {});
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Webhook Config
+   ═══════════════════════════════════════════════════════════════════ */
+function loadWebhookConfig() {
+    fetch('/api/telemetry/webhook/config')
+        .then(r => r.json())
+        .then(cfg => {
+            document.getElementById('webhook-url').value = cfg.url || '';
+            document.getElementById('webhook-interval').value = cfg.interval_minutes || 0;
+            document.getElementById('webhook-threshold').value = cfg.battery_threshold || 20.0;
+            document.getElementById('webhook-enabled').checked = !!cfg.enabled;
+            document.getElementById('webhook-on-threshold').checked = cfg.on_threshold !== false;
+        })
+        .catch(() => {});
+}
+
+function saveWebhookConfig() {
+    const data = {
+        url: document.getElementById('webhook-url').value.trim(),
+        interval_minutes: parseInt(document.getElementById('webhook-interval').value) || 0,
+        battery_threshold: parseFloat(document.getElementById('webhook-threshold').value) || 20.0,
+        enabled: document.getElementById('webhook-enabled').checked,
+        on_threshold: document.getElementById('webhook-on-threshold').checked,
+    };
+    fetch('/api/telemetry/webhook/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(data),
+    })
+    .then(r => r.json())
+    .then(res => {
+        if (res.success) toast(res.message || 'Gespeichert');
+        else toast(res.error || 'Fehler', 'error');
+    })
+    .catch(e => toast('Fehler: ' + e.message, 'error'));
+}
+
+function testWebhook() {
+    const btn = document.getElementById('testWebhookBtn');
+    const res = document.getElementById('webhook-test-result');
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>Testen&hellip;';
+    fetch('/api/telemetry/webhook/test', {method: 'POST'})
+        .then(r => r.json())
+        .then(data => {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-vial me-1"></i>Testen';
+            const cls = data.success ? 'alert-success' : 'alert-danger';
+            const icon = data.success ? 'fa-check-circle' : 'fa-times-circle';
+            const msg = data.message || data.error || 'Unbekannt';
+            const time = data.response_time != null ? ` (${data.response_time}ms)` : '';
+            res.innerHTML = `<div class="alert ${cls} py-2 mb-0 small"><i class="fas ${icon} me-1"></i>${escHtml(msg)}${time}</div>`;
+        })
+        .catch(e => {
+            btn.disabled = false;
+            btn.innerHTML = '<i class="fas fa-vial me-1"></i>Testen';
+            res.innerHTML = `<div class="alert alert-danger py-2 mb-0 small"><i class="fas fa-times-circle me-1"></i>${escHtml(e.message)}</div>`;
+        });
+}
+
+function loadWebhookLog() {
+    fetch('/api/telemetry/webhook/log')
+        .then(r => r.json())
+        .then(data => {
+            const log = data.log || data || [];
+            const tbody = document.getElementById('webhookLogBody');
+            if (!log.length) {
+                tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">Keine Log-Einträge</td></tr>';
+                return;
+            }
+            tbody.innerHTML = log.map(l => {
+                const badge = l.success ? 'bg-success' : 'bg-danger';
+                return `<tr>
+                    <td>${formatTime(l.timestamp)}</td>
+                    <td>${escHtml(l.trigger || '-')}</td>
+                    <td><span class="badge ${badge}">${l.status_code || '-'}</span></td>
+                    <td>${escHtml(l.error || '-')}</td>
+                </tr>`;
+            }).join('');
+        })
+        .catch(() => {});
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Available Contacts
+   ═══════════════════════════════════════════════════════════════════ */
+function loadAvailableContacts() {
+    fetch('/api/telemetry/available-contacts')
+        .then(r => r.json())
+        .then(data => {
+            const contacts = data.contacts || data || [];
+            const dl = document.getElementById('available-contacts-list');
+            dl.innerHTML = contacts.map(c => `<option value="${escAttr(c.name)}">`).join('');
+        })
+        .catch(() => {});
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Helpers
+   ═══════════════════════════════════════════════════════════════════ */
+function formatTime(ts) {
+    if (!ts) return '-';
+    try {
+        const d = new Date(ts.includes('T') ? ts : ts.replace(' ', 'T'));
+        if (isNaN(d.getTime())) return ts;
+        return d.toLocaleString('de-DE', {day:'2-digit', month:'2-digit', year:'2-digit',
+                                          hour:'2-digit', minute:'2-digit', second:'2-digit'});
+    } catch { return ts; }
+}
+
+function escHtml(s) {
+    if (!s) return '';
+    const d = document.createElement('div');
+    d.textContent = String(s);
+    return d.innerHTML;
+}
+
+function escAttr(s) {
+    return String(s||'').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+}
+</script>
+{% endblock %}
