@@ -1041,11 +1041,39 @@ class PacketCaptureService(BaseServicePlugin):
                 publish_metrics = await self.publish_packet_mqtt(formatted_packet)
             
             # Store in web viewer database (includes decoded GRP_TXT when available)
+            # Must convert from MQTT format to web-viewer format (different field names)
             if (hasattr(self.bot, 'web_viewer_integration') and
                     self.bot.web_viewer_integration and
                     self.bot.web_viewer_integration.bot_integration):
                 try:
-                    self.bot.web_viewer_integration.bot_integration.capture_full_packet_data(formatted_packet)
+                    decoded = formatted_packet.get('decoded', {})
+                    _route_name_map = {
+                        'FLOOD': 0, 'DIRECT': 1,
+                        'TRANSPORT_FLOOD': 2, 'TRANSPORT_DIRECT': 3,
+                    }
+                    wv_packet = {
+                        'header': decoded.get('header_byte', ''),
+                        'route_type_name': decoded.get('route_type_name', 'UNKNOWN'),
+                        'route_type': _route_name_map.get(decoded.get('route_type_name', ''), 0),
+                        'payload_type_name': decoded.get('payload_type_name', 'UNKNOWN'),
+                        'payload_type': int(formatted_packet.get('packet_type', '0')),
+                        'payload_version': decoded.get('payload_version', 0),
+                        'path_len': decoded.get('path_len', 0),
+                        'path': decoded.get('path_nodes', []),
+                        'has_transport_codes': bool(decoded.get('transport_codes')),
+                        'transport_codes': decoded.get('transport_codes'),
+                        'payload_bytes': int(formatted_packet.get('payload_len', '0')),
+                        'raw_packet_hex': formatted_packet.get('raw', ''),
+                        'packet_hash': formatted_packet.get('hash', ''),
+                        'hops': decoded.get('path_len', 0),
+                        'decoded': decoded,
+                    }
+                    # Extract advert info for display
+                    advert = decoded.get('advert')
+                    if isinstance(advert, dict) and advert.get('name'):
+                        wv_packet['advert_name'] = advert['name']
+                        wv_packet['advert_mode'] = advert.get('device_role', 'Unknown')
+                    self.bot.web_viewer_integration.bot_integration.capture_full_packet_data(wv_packet)
                 except Exception as e:
                     self.logger.debug(f"Error storing packet for web viewer: {e}")
             
