@@ -324,6 +324,17 @@
                     <div id="service-status-badge">
                         <span class="badge bg-secondary">Lädt&hellip;</span>
                     </div>
+                    <hr class="my-2">
+                    <div class="form-check form-switch mb-0">
+                        <input class="form-check-input" type="checkbox" id="hbme-telemetry-forward"
+                               onchange="toggleTelemetryForward(this.checked)">
+                        <label class="form-check-label small" for="hbme-telemetry-forward">
+                            <i class="fas fa-thermometer-half me-1 text-info"></i>Telemetriedaten an HBME senden
+                        </label>
+                    </div>
+                    <p class="text-muted mb-0 mt-1" style="font-size: 0.75rem;">
+                        Leitet Batterie-Telemetrie der überwachten Repeater an <code>/ingestor/auth/telemetry</code> weiter.
+                    </p>
                 </div>
             </div>
 
@@ -612,6 +623,7 @@ function loadConfig() {
         .then(r => r.json())
         .then(d => {
             document.getElementById('hbme-enabled').checked = d.enabled;
+            document.getElementById('hbme-telemetry-forward').checked = !!d.telemetry_forward_enabled;
             document.getElementById('inp-api-url').value  = d.api_url  || 'https://api.hbme.sh/ingestor/auth/packet';
             document.getElementById('inp-auth-url').value = d.auth_url || 'https://auth.hbme.sh/api/firstfactor';
             if (d.username) document.getElementById('inp-username').value = d.username;
@@ -785,6 +797,28 @@ function toggleService(enabled) {
     })
     .catch(e => {
         document.getElementById('hbme-enabled').checked = !enabled;
+        toast('Fehler: ' + e.message, 'error');
+    });
+}
+
+function toggleTelemetryForward(enabled) {
+    fetch('/api/services/hbme/telemetry-forward', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled })
+    })
+    .then(r => r.json())
+    .then(res => {
+        if (res.success) {
+            document.getElementById('hbme-telemetry-forward').checked = res.enabled;
+            toast(res.message);
+        } else {
+            document.getElementById('hbme-telemetry-forward').checked = !enabled;
+            toast(res.error || 'Fehler', 'error');
+        }
+    })
+    .catch(e => {
+        document.getElementById('hbme-telemetry-forward').checked = !enabled;
         toast('Fehler: ' + e.message, 'error');
     });
 }

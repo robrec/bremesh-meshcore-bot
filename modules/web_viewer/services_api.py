@@ -9,6 +9,7 @@ import json
 import os
 import sqlite3
 from datetime import datetime
+from typing import Optional
 from flask import jsonify, request
 
 
@@ -89,6 +90,16 @@ class ServicesAPI:
         def api_hbme_clear_error():
             """Clear last error."""
             return self._clear_hbme_error()
+        
+        @self.app.route('/api/services/hbme/telemetry-forward')
+        def api_hbme_telemetry_forward_config():
+            """Get HBME telemetry forwarding config."""
+            return self._get_hbme_telemetry_forward_config()
+        
+        @self.app.route('/api/services/hbme/telemetry-forward', methods=['POST'])
+        def api_hbme_telemetry_forward_save():
+            """Save HBME telemetry forwarding config."""
+            return self._save_hbme_telemetry_forward_config()
         
         # ─────────────────────────────────────────────────────────────────────
         # Telemetry Monitor Service
@@ -243,6 +254,7 @@ class ServicesAPI:
             username = self.db_manager.get_metadata('hbme_ingestor_username')
             password = self.db_manager.get_metadata('hbme_ingestor_password')
             preview_mode = self.db_manager.get_metadata('hbme_ingestor_preview_mode')
+            telemetry_forward = self.db_manager.get_metadata('hbme_telemetry_forward_enabled')
             
             # Default values
             default_url = 'https://api.hbme.sh/ingestor/auth/packet'
@@ -251,6 +263,7 @@ class ServicesAPI:
             return jsonify({
                 'enabled': enabled == 'true' if enabled else False,
                 'preview_mode': preview_mode == 'true' if preview_mode is not None else True,
+                'telemetry_forward_enabled': telemetry_forward == 'true' if telemetry_forward else False,
                 'api_url': api_url or default_url,
                 'auth_url': auth_url or default_auth_url,
                 'has_credentials': bool(username and password),
@@ -610,6 +623,37 @@ class ServicesAPI:
                 await service.start()
             elif not enable and service._running:
                 await service.stop()
+    
+    def _get_hbme_telemetry_forward_config(self):
+        """Get HBME telemetry forwarding configuration."""
+        try:
+            enabled = self.db_manager.get_metadata('hbme_telemetry_forward_enabled')
+            return jsonify({
+                'enabled': enabled == 'true' if enabled else False,
+            })
+        except Exception as e:
+            self.logger.error(f"Error getting HBME telemetry forward config: {e}")
+            return jsonify({'error': str(e)}), 500
+    
+    def _save_hbme_telemetry_forward_config(self):
+        """Save HBME telemetry forwarding configuration."""
+        try:
+            data = request.get_json()
+            if data is None:
+                return jsonify({'success': False, 'error': 'No data'}), 400
+            
+            enabled = bool(data.get('enabled', False))
+            self.db_manager.set_metadata(
+                'hbme_telemetry_forward_enabled', 'true' if enabled else 'false')
+            
+            return jsonify({
+                'success': True,
+                'enabled': enabled,
+                'message': 'Telemetrie-Weiterleitung ' + ('aktiviert' if enabled else 'deaktiviert'),
+            })
+        except Exception as e:
+            self.logger.error(f"Error saving HBME telemetry forward config: {e}")
+            return jsonify({'error': str(e)}), 500
     
     def _get_hbme_preview(self):
         """Get preview packets from HBME Ingestor."""
@@ -1062,6 +1106,28 @@ class ServicesAPI:
             self.logger.error(f"Error getting repeaters: {e}")
             return {'repeaters': [], 'success': False, 'error': str(e)}
     
+    def _resolve_public_key(self, name: str) -> Optional[str]:
+        """Resolve a repeater's public_key from the bot's contact list."""
+        if not self.bot or not hasattr(self.bot, 'meshcore') or not self.bot.meshcore:
+            return None
+        try:
+            contact = self.bot.meshcore.get_contact_by_name(name)
+            if not contact:
+                contacts = self.bot.meshcore.contacts if hasattr(self.bot.meshcore, 'contacts') else []
+                for c in contacts:
+                    c_name = c.get('adv_name', '') or c.get('name', '') if isinstance(c, dict) else (
+                        getattr(c, 'adv_name', '') or getattr(c, 'name', ''))
+                    if name.lower() in c_name.lower():
+                        contact = c
+                        break
+            if contact:
+                key = (contact.get('public_key') if isinstance(contact, dict)
+                       else getattr(contact, 'public_key', None))
+                return key or None
+        except Exception:
+            pass
+        return None
+
     def _add_monitored_repeater(self, name: str) -> dict:
         """Add a new repeater to monitoring list."""
         try:
@@ -1073,9 +1139,11 @@ class ServicesAPI:
             # Get max sort_order
             cursor.execute('SELECT COALESCE(MAX(sort_order), 0) + 1 as next_order FROM monitored_repeaters')
             next_order = cursor.fetchone()['next_order']
+            # Auto-resolve public_key from contact list
+            public_key = self._resolve_public_key(name)
             cursor.execute(
-                'INSERT INTO monitored_repeaters (name, sort_order) VALUES (?, ?)',
-                (name, next_order))
+                'INSERT INTO monitored_repeaters (name, sort_order, public_key) VALUES (?, ?, ?)',
+                (name, next_order, public_key))
             conn.commit()
             repeater_id = cursor.lastrowid
             conn.close()

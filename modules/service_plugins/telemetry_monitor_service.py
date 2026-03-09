@@ -266,6 +266,46 @@ class TelemetryMonitorService(BaseServicePlugin):
         self._migrate_repeaters_from_config()
         self._load_repeaters_from_db()
 
+    def _resolve_public_key_for_name(self, name: str) -> Optional[str]:
+        """Resolve a repeater's public_key from the bot's contact list."""
+        if not hasattr(self.bot, 'meshcore') or not self.bot.meshcore:
+            return None
+        try:
+            contact = self.bot.meshcore.get_contact_by_name(name)
+            if not contact:
+                contacts = self.bot.meshcore.contacts if hasattr(self.bot.meshcore, 'contacts') else []
+                for c in contacts:
+                    c_name = c.get('adv_name', '') or c.get('name', '') if isinstance(c, dict) else (
+                        getattr(c, 'adv_name', '') or getattr(c, 'name', ''))
+                    if name.lower() in c_name.lower():
+                        contact = c
+                        break
+            if contact:
+                key = (contact.get('public_key') if isinstance(contact, dict)
+                       else getattr(contact, 'public_key', None))
+                return key or None
+        except Exception as e:
+            logger.debug(f"Could not resolve public_key for {name}: {e}")
+        return None
+
+    def _backfill_missing_public_keys(self) -> None:
+        """Fill in missing public_keys in monitored_repeaters from the contact list."""
+        if not self._db_conn:
+            return
+        cursor = self._db_conn.cursor()
+        cursor.execute('SELECT id, name FROM monitored_repeaters WHERE public_key IS NULL OR public_key = ?', ('',))
+        rows = cursor.fetchall()
+        filled = 0
+        for row in rows:
+            key = self._resolve_public_key_for_name(row['name'])
+            if key:
+                cursor.execute('UPDATE monitored_repeaters SET public_key = ? WHERE id = ?', (key, row['id']))
+                filled += 1
+                logger.info(f"Backfilled public_key for {row['name']}: {key[:12]}...")
+        if filled:
+            self._db_conn.commit()
+            logger.info(f"Backfilled {filled} missing public_key(s) in monitored_repeaters")
+
     def _migrate_repeaters_from_config(self) -> None:
         """Migrate repeaters from config into DB if DB is empty."""
         if not self._db_conn or not self.repeaters:
@@ -275,9 +315,10 @@ class TelemetryMonitorService(BaseServicePlugin):
         if cursor.fetchone()[0] > 0:
             return  # DB already has repeaters
         for idx, name in enumerate(self.repeaters):
+            key = self._resolve_public_key_for_name(name)
             cursor.execute(
-                'INSERT OR IGNORE INTO monitored_repeaters (name, sort_order) VALUES (?, ?)',
-                (name, idx))
+                'INSERT OR IGNORE INTO monitored_repeaters (name, sort_order, public_key) VALUES (?, ?, ?)',
+                (name, idx, key))
         self._db_conn.commit()
         logger.info(f"Migrated {len(self.repeaters)} repeaters from config to DB")
 
@@ -547,6 +588,9 @@ class TelemetryMonitorService(BaseServicePlugin):
 
         # Start polling loop
         self._poll_task = asyncio.create_task(self._polling_loop())
+
+        # Backfill any missing public keys from the contact list
+        self._backfill_missing_public_keys()
 
         logger.info(
             f"TelemetryMonitor started – {len(self.repeaters)} repeaters, "
@@ -1019,6 +1063,9 @@ class TelemetryMonitorService(BaseServicePlugin):
 
             # Webhook: check threshold + interval
             self._maybe_send_webhook(repeater_name, parsed)
+
+            # HBME telemetry forwarding (opt-in)
+            self._maybe_send_hbme_telemetry(repeater_name, parsed)
         except Exception as e:
             logger.error(f"Error storing reading: {e}")
 
@@ -1146,6 +1193,93 @@ class TelemetryMonitorService(BaseServicePlugin):
             self._db_conn.commit()
         except Exception as e:
             logger.debug(f"Webhook log error: {e}")
+
+    # ──────────────────────────────────────────────────────────────────
+    # HBME Telemetry Forwarding
+    # ──────────────────────────────────────────────────────────────────
+
+    def _maybe_send_hbme_telemetry(self, repeater_name: str, parsed: Dict[str, Any]) -> None:
+        """Forward telemetry data to HBME API if opt-in is enabled."""
+        try:
+            # Check opt-in flag from bot's DB
+            if not hasattr(self.bot, 'db_manager') or not self.bot.db_manager:
+                return
+            enabled = self.bot.db_manager.get_metadata('hbme_telemetry_forward_enabled')
+            if enabled != 'true':
+                return
+
+            # Need battery data
+            voltage = parsed.get('battery_voltage')
+            percent = parsed.get('battery_percent')
+            if voltage is None and percent is None:
+                return
+
+            # Get public_key from monitored_repeaters table
+            public_key = self._get_repeater_public_key(repeater_name)
+            if not public_key:
+                logger.debug(f"HBME telemetry skip: no public_key for {repeater_name}")
+                return
+
+            # Get HBME ingestor service for authenticated session
+            hbme_service = None
+            if hasattr(self.bot, 'services') and isinstance(self.bot.services, dict):
+                hbme_service = self.bot.services.get('hbmeingestor')
+
+            if not hbme_service or not hbme_service._running:
+                logger.debug("HBME telemetry skip: ingestor service not running")
+                return
+
+            # Build payload
+            payload: Dict[str, Any] = {'public_key': public_key}
+            if voltage is not None:
+                payload['battery_voltage'] = round(voltage, 2)
+            if percent is not None:
+                payload['battery_percent'] = round(percent, 1)
+
+            # Derive telemetry URL from the packet API URL
+            api_url = getattr(hbme_service, 'api_url', '')
+            if api_url.endswith('/packet'):
+                telemetry_url = api_url.rsplit('/packet', 1)[0] + '/telemetry'
+            else:
+                telemetry_url = 'https://api.hbme.sh/ingestor/auth/telemetry'
+
+            # Send via HBME ingestor's authenticated session
+            if self._event_loop and not self._event_loop.is_closed():
+                asyncio.run_coroutine_threadsafe(
+                    self._send_hbme_telemetry(hbme_service, payload, telemetry_url),
+                    self._event_loop)
+
+        except Exception as e:
+            logger.debug(f"HBME telemetry forward error: {e}")
+
+    def _get_repeater_public_key(self, repeater_name: str) -> Optional[str]:
+        """Look up the public_key for a repeater from the monitored_repeaters table."""
+        if not self._db_conn:
+            return None
+        try:
+            cursor = self._db_conn.cursor()
+            cursor.execute(
+                'SELECT public_key FROM monitored_repeaters WHERE name = ?',
+                (repeater_name,))
+            row = cursor.fetchone()
+            if row and row['public_key']:
+                return row['public_key']
+        except Exception:
+            pass
+        return None
+
+    async def _send_hbme_telemetry(self, hbme_service: Any,
+                                   payload: Dict[str, Any],
+                                   telemetry_url: str) -> None:
+        """Send telemetry data to HBME API using the ingestor's authenticated session."""
+        try:
+            success = await hbme_service.send_to_api(payload, api_url=telemetry_url)
+            if success:
+                logger.info(f"HBME telemetry sent for {payload.get('public_key', '?')[:12]}")
+            else:
+                logger.warning(f"HBME telemetry send failed for {payload.get('public_key', '?')[:12]}")
+        except Exception as e:
+            logger.warning(f"HBME telemetry send error: {e}")
 
     # ──────────────────────────────────────────────────────────────────
     # Public API for web viewer

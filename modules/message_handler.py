@@ -755,10 +755,10 @@ class MessageHandler:
                                 # Format path with comma separation (every 2 characters)
                                 path_hex = routing_info['path_hex']
                                 formatted_path = ','.join([path_hex[i:i+2] for i in range(0, len(path_hex), 2)])
-                                log_message = f"🛣️  ROUTING INFO: {routing_info['route_type']} | Path: {formatted_path} ({routing_info['path_length']} bytes) | Payload: {routing_info['payload_length']} bytes | Type: {routing_info['payload_type']}"
+                                log_message = f"ROUTING INFO: {routing_info['route_type']} | Path: {formatted_path} ({routing_info['path_length']} bytes) | Payload: {routing_info['payload_length']} bytes | Type: {routing_info['payload_type']}"
                                 self.logger.info(log_message)
                             else:
-                                log_message = f"📡 DIRECT MESSAGE: {routing_info['route_type']} | Type: {routing_info['payload_type']}"
+                                log_message = f"DIRECT MESSAGE: {routing_info['route_type']} | Type: {routing_info['payload_type']}"
                                 self.logger.info(log_message)
                             
                             # Capture full packet data for web viewer (for all packets)

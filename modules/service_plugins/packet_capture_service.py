@@ -216,12 +216,15 @@ class PacketCaptureService(BaseServicePlugin):
         self._channel_keyring: Dict[int, List[tuple]] = {}
         self._build_channel_keyring(config)
     
+    # Well-known Public channel key (hardcoded in MeshCore firmware)
+    PUBLIC_CHANNEL_KEY = bytes.fromhex('8b3387e9c5cdea6ac9e5edbaa115cd72')
+
     def _build_channel_keyring(self, config) -> None:
         """Build a keyring of channel keys for GRP_TXT decryption.
 
         Key derivation follows MeshCore firmware conventions:
-        - Channel names starting with '#' (e.g. #ping): key = SHA256(name_as_is)[:16]
-        - Channel names without '#' (e.g. Public): key = SHA256(name_as_is)[:16]
+        - 'Public' channel: uses well-known hardcoded key (8b3387e9...)
+        - Channel names starting with '#' (e.g. #ping): key = SHA256(name_lowercase)[:16]
         - The channel hash byte = SHA256(key_bytes)[0], used for fast matching.
 
         Sources:
@@ -238,8 +241,12 @@ class PacketCaptureService(BaseServicePlugin):
                 name = name.strip()
                 if not name:
                     continue
-                # Derive key: hash the name exactly as given
-                key_bytes = hashlib.sha256(name.encode('utf-8')).digest()[:16]
+                # Public channel uses well-known hardcoded key
+                if name.lower() == 'public':
+                    key_bytes = self.PUBLIC_CHANNEL_KEY
+                else:
+                    # Hashtag channels: key = SHA256(lowercase_name)[:16]
+                    key_bytes = hashlib.sha256(name.lower().encode('utf-8')).digest()[:16]
                 hash_byte = hashlib.sha256(key_bytes).digest()[0]
                 if hash_byte not in self._channel_keyring:
                     self._channel_keyring[hash_byte] = []
