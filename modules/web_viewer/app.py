@@ -2547,7 +2547,7 @@ class BotDataViewer:
                 return jsonify({'error': str(e)}), 500
         
         # Initialize Services API module (HBME Ingestor, etc.)
-        self.services_api = ServicesAPI(self.app, self.db_manager, self.logger)
+        self.services_api = ServicesAPI(self.app, self.db_manager, self.logger, self.config)
     
     def _setup_socketio_handlers(self):
         """Setup SocketIO event handlers using modern patterns"""

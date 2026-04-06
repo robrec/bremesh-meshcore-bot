@@ -16,7 +16,7 @@ from flask import jsonify, request
 class ServicesAPI:
     """Handles Services API endpoints for external integrations."""
     
-    def __init__(self, app, db_manager, logger, bot_instance=None):
+    def __init__(self, app, db_manager, logger, config=None, bot_instance=None):
         """Initialize Services API.
         
         Args:
@@ -28,6 +28,7 @@ class ServicesAPI:
         self.app = app
         self.db_manager = db_manager
         self.logger = logger
+        self.config = config
         self.bot = bot_instance
         self._register_routes()
     
