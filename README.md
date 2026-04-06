@@ -788,7 +788,7 @@ poll_interval_minutes = 180
 request_timeout = 60
 max_retries = 3
 default_path_mode = flood
-database_path = telemetry_data.db
+database_path = /data/databases/telemetry_data.db
 # MQTT aktivieren für externe Systeme
 mqtt_enabled = true
 mqtt_topic_request = meshcore/telemetry/request

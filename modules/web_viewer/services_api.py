@@ -5,6 +5,7 @@ Handles API endpoints for external service integrations (HBME Ingestor, Telemetr
 """
 
 import asyncio
+import functools
 import json
 import os
 import sqlite3
@@ -16,7 +17,7 @@ from flask import jsonify, request
 class ServicesAPI:
     """Handles Services API endpoints for external integrations."""
     
-    def __init__(self, app, db_manager, logger, bot_instance=None):
+    def __init__(self, app, db_manager, logger, config=None, bot_instance=None):
         """Initialize Services API.
         
         Args:
@@ -28,6 +29,7 @@ class ServicesAPI:
         self.app = app
         self.db_manager = db_manager
         self.logger = logger
+        self.config = config
         self.bot = bot_instance
         self._register_routes()
     
@@ -818,20 +820,11 @@ class ServicesAPI:
     # ─────────────────────────────────────────────────────────────────────────
     # Telemetry Monitor Methods
     # ─────────────────────────────────────────────────────────────────────────
-    
+
+    @functools.cache
     def _get_telemetry_db_path(self) -> str:
         """Resolve the telemetry database path from config."""
-        import configparser
-        config = configparser.ConfigParser()
-        # Get the config path from the app instance
-        config_path = getattr(self.app, '_config_path', None)
-        if not config_path:
-            # Fallback: resolve from bot root
-            bot_root = os.path.join(os.path.dirname(__file__), '..', '..')
-            config_path = os.path.join(bot_root, 'config.ini')
-        config.read(config_path, encoding='utf-8')
-        
-        db_path = config.get('TelemetryMonitor', 'database_path', fallback='telemetry_data.db')
+        db_path = self.config.get('TelemetryMonitor', 'database_path', fallback='telemetry_data.db')
         if not os.path.isabs(db_path):
             bot_root = os.path.join(os.path.dirname(__file__), '..', '..')
             db_path = os.path.join(os.path.abspath(bot_root), db_path)
@@ -843,31 +836,24 @@ class ServicesAPI:
         conn = sqlite3.connect(db_path, timeout=10.0)
         conn.row_factory = sqlite3.Row
         return conn
-    
+
+    @functools.cache
     def _get_telemetry_config(self) -> dict:
         """Read TelemetryMonitor config section."""
-        import configparser
-        config = configparser.ConfigParser()
-        config_path = getattr(self.app, '_config_path', None)
-        if not config_path:
-            bot_root = os.path.join(os.path.dirname(__file__), '..', '..')
-            config_path = os.path.join(bot_root, 'config.ini')
-        config.read(config_path, encoding='utf-8')
-        
-        if not config.has_section('TelemetryMonitor'):
+        if not self.config.has_section('TelemetryMonitor'):
             return {'enabled': False}
         
         return {
-            'enabled': config.getboolean('TelemetryMonitor', 'enabled', fallback=False),
-            'poll_interval_minutes': config.getint('TelemetryMonitor', 'poll_interval_minutes', fallback=30),
-            'request_timeout': config.getint('TelemetryMonitor', 'request_timeout', fallback=60),
-            'max_retries': config.getint('TelemetryMonitor', 'max_retries', fallback=3),
-            'default_path_mode': config.get('TelemetryMonitor', 'default_path_mode', fallback='flood'),
-            'mqtt_enabled': config.getboolean('TelemetryMonitor', 'mqtt_enabled', fallback=False),
-            'mqtt_server': config.get('MQTT', 'server', fallback='localhost'),
-            'mqtt_port': config.getint('MQTT', 'port', fallback=1883),
-            'mqtt_topic_request': config.get('TelemetryMonitor', 'mqtt_topic_request', fallback='meshcore/telemetry/request'),
-            'mqtt_topic_response': config.get('TelemetryMonitor', 'mqtt_topic_response', fallback='meshcore/telemetry/response'),
+            'enabled': self.config.getboolean('TelemetryMonitor', 'enabled', fallback=False),
+            'poll_interval_minutes': self.config.getint('TelemetryMonitor', 'poll_interval_minutes', fallback=30),
+            'request_timeout': self.config.getint('TelemetryMonitor', 'request_timeout', fallback=60),
+            'max_retries': self.config.getint('TelemetryMonitor', 'max_retries', fallback=3),
+            'default_path_mode': self.config.get('TelemetryMonitor', 'default_path_mode', fallback='flood'),
+            'mqtt_enabled': self.config.getboolean('TelemetryMonitor', 'mqtt_enabled', fallback=False),
+            'mqtt_server': self.config.get('MQTT', 'server', fallback='localhost'),
+            'mqtt_port': self.config.getint('MQTT', 'port', fallback=1883),
+            'mqtt_topic_request': self.config.get('TelemetryMonitor', 'mqtt_topic_request', fallback='meshcore/telemetry/request'),
+            'mqtt_topic_response': self.config.get('TelemetryMonitor', 'mqtt_topic_response', fallback='meshcore/telemetry/response'),
         }
     
     def _get_telemetry_status(self) -> dict:
